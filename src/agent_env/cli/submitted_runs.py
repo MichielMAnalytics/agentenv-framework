@@ -10,6 +10,7 @@ import click
 
 from agent_env.config import get_runner
 from agent_env.runner.runner import RunHandle, RunRecord, RunStatus
+from agent_env.task.interrupts import tearing_down
 from agent_env.task.store import TaskInstance, TaskStepStatus, find_task_instance
 
 POLL_SECONDS = 2.0
@@ -41,8 +42,9 @@ async def submit_and_follow(submissions, runs: list[SubmittedRun], *, agent_mode
     """Submit each ``(tag, task, metadata)``, appending it to ``runs``, and follow every run until it is terminal.
 
     A cancel, the first Ctrl-C, asks the runner to cancel what is still going and follows it to the end; a second
-    stops waiting. Never ``start()``: that is the serving process's, and ``LocalRunner``'s fails every local run
-    another process has in flight. ``stop()`` lets a ``LocalRunner`` finish tearing its runs down."""
+    stops waiting. However it ends, short of that second one, ``stop()`` is awaited, spared from a first Ctrl-C: it
+    lets a ``LocalRunner`` finish tearing its runs down. Never ``start()``: that is the serving process's, and
+    ``LocalRunner``'s fails every local run another process has in flight."""
     runner = get_runner()
     try:
         for tag, task, metadata in submissions:
@@ -56,8 +58,16 @@ async def submit_and_follow(submissions, runs: list[SubmittedRun], *, agent_mode
             if not run.done:
                 await runner.cancel(run.handle.run_id)
         await _follow(runner, runs)
-        await runner.stop()
+        await _stop(runner)
         raise
+    except Exception:
+        await _stop(runner)
+        raise
+    await _stop(runner)
+
+
+async def _stop(runner) -> None:
+    tearing_down()
     await runner.stop()
 
 

@@ -15,7 +15,7 @@ from agent_env.cli import cli, submitted_runs
 from agent_env.eval import Eval
 from agent_env.runner import local_runner
 from agent_env.runner import store as run_store
-from agent_env.runner.runner import RunStatus
+from agent_env.runner.runner import RunHandle, Runner, RunRecord, RunStatus
 from agent_env.task import Task
 from agent_env.task.teardown import TeardownReport
 
@@ -125,3 +125,50 @@ def test_an_eval_submit_leaves_concurrency_to_the_runner(monkeypatch):
 
     assert result.exit_code == 2
     assert "drop --max-concurrency" in result.output
+
+
+class _Runner(Runner):
+    """Completes every run at submit; ``stop()`` naps, then records that it finished."""
+
+    type = "fake"
+
+    def __init__(self, status_error=None, stop_seconds=0.0):
+        self.status_error, self.stop_seconds, self.stopped, self.records = status_error, stop_seconds, False, {}
+
+    async def submit(self, task_id, task_version=None, **_):
+        record = RunRecord(run_id=f"r{len(self.records)}", runner=self.type, task_id=task_id,
+                           task_version=task_version, instance_id=f"i{len(self.records)}", status=RunStatus.COMPLETED)
+        self.records[record.run_id] = record
+        return RunHandle(record.run_id, record.instance_id)
+
+    async def status(self, run_id):
+        if self.status_error:
+            raise self.status_error
+        return self.records[run_id]
+
+    async def cancel(self, run_id):
+        return False
+
+    async def stop(self):
+        await asyncio.sleep(self.stop_seconds)
+        self.stopped = True
+
+
+def test_an_error_following_the_runs_still_stops_the_runner(monkeypatch, local_stores):
+    runner = _Runner(status_error=RuntimeError("run index unreachable"))
+    local_stores.set_runner(runner)
+
+    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit")
+
+    assert isinstance(result.exception, RuntimeError)
+    assert runner.stopped
+
+
+def test_a_first_ctrl_c_lets_the_runner_finish_stopping(monkeypatch, local_stores):
+    runner = _Runner(stop_seconds=2.0)
+    local_stores.set_runner(runner)
+
+    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit", signal_after=0.5)
+
+    assert result.exit_code == 130, result.output
+    assert runner.stopped
