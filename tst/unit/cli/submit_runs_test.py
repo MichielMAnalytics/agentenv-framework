@@ -128,16 +128,17 @@ def test_an_eval_submit_leaves_concurrency_to_the_runner(monkeypatch):
 
 
 class _Runner(Runner):
-    """Completes every run at submit; ``stop()`` naps, then records that it finished."""
+    """Gives every run ``run_status`` at submit; ``stop()`` naps, then records that it finished."""
 
     type = "fake"
 
-    def __init__(self, status_error=None, stop_seconds=0.0):
-        self.status_error, self.stop_seconds, self.stopped, self.records = status_error, stop_seconds, False, {}
+    def __init__(self, status_error=None, cancel_error=None, stop_seconds=0.0, run_status=RunStatus.COMPLETED):
+        self.status_error, self.cancel_error, self.stop_seconds = status_error, cancel_error, stop_seconds
+        self.run_status, self.stopped, self.records = run_status, False, {}
 
     async def submit(self, task_id, task_version=None, **_):
         record = RunRecord(run_id=f"r{len(self.records)}", runner=self.type, task_id=task_id,
-                           task_version=task_version, instance_id=f"i{len(self.records)}", status=RunStatus.COMPLETED)
+                           task_version=task_version, instance_id=f"i{len(self.records)}", status=self.run_status)
         self.records[record.run_id] = record
         return RunHandle(record.run_id, record.instance_id)
 
@@ -147,6 +148,8 @@ class _Runner(Runner):
         return self.records[run_id]
 
     async def cancel(self, run_id):
+        if self.cancel_error:
+            raise self.cancel_error
         return False
 
     async def stop(self):
@@ -171,4 +174,14 @@ def test_a_first_ctrl_c_lets_the_runner_finish_stopping(monkeypatch, local_store
     result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit", signal_after=0.5)
 
     assert result.exit_code == 130, result.output
+    assert runner.stopped
+
+
+def test_an_error_cancelling_after_ctrl_c_still_stops_the_runner(monkeypatch, local_stores):
+    runner = _Runner(cancel_error=RuntimeError("runner unreachable"), run_status=RunStatus.RUNNING)
+    local_stores.set_runner(runner)
+
+    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit", signal_after=0.5)
+
+    assert isinstance(result.exception, RuntimeError)
     assert runner.stopped

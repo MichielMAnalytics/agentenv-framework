@@ -46,29 +46,33 @@ async def submit_and_follow(submissions, runs: list[SubmittedRun], *, agent_mode
     lets a ``LocalRunner`` finish tearing its runs down. Never ``start()``: that is the serving process's, and
     ``LocalRunner``'s fails every local run another process has in flight."""
     runner = get_runner()
+    stopping_now = False
     try:
-        for tag, task, metadata in submissions:
-            handle = await runner.submit(task.id, task.version, agent_model=agent_model,
-                                         agent_artifact_id=agent_artifact_id, metadata=metadata)
-            _echo(tag, f"Submitted run {handle.run_id} (instance {handle.instance_id})", "blue")
-            runs.append(SubmittedRun(tag, task.id, handle))
-        await _follow(runner, runs)
-    except asyncio.CancelledError:
-        for run in runs:
-            if not run.done:
-                await runner.cancel(run.handle.run_id)
-        await _follow(runner, runs)
-        await _stop(runner)
-        raise
-    except Exception:
-        await _stop(runner)
-        raise
-    await _stop(runner)
+        try:
+            for tag, task, metadata in submissions:
+                handle = await runner.submit(task.id, task.version, agent_model=agent_model,
+                                             agent_artifact_id=agent_artifact_id, metadata=metadata)
+                _echo(tag, f"Submitted run {handle.run_id} (instance {handle.instance_id})", "blue")
+                runs.append(SubmittedRun(tag, task.id, handle))
+            await _follow(runner, runs)
+        except asyncio.CancelledError:
+            try:
+                await _cancel_and_follow(runner, runs)
+            except asyncio.CancelledError:
+                stopping_now = True
+                raise
+            raise
+    finally:
+        if not stopping_now:
+            tearing_down()
+            await runner.stop()
 
 
-async def _stop(runner) -> None:
-    tearing_down()
-    await runner.stop()
+async def _cancel_and_follow(runner, runs: list[SubmittedRun]) -> None:
+    for run in runs:
+        if not run.done:
+            await runner.cancel(run.handle.run_id)
+    await _follow(runner, runs)
 
 
 def on_signal(count: int) -> None:
