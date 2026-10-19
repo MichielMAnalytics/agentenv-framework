@@ -73,7 +73,7 @@ from .triggers import TriggerEngine, TriggerError
 
 logger = logging.getLogger(__name__)
 
-# RFC 9110's safe methods: a request using one asks for no change, so the REST proxy logs no write window for it.
+# RFC 9110's safe methods: a request using one asks for no change, so the proxy measures no write window for it.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
 
@@ -497,7 +497,7 @@ class Gateway:
             return None
         try:
             with self._db_conn.cursor() as cur:
-                cur.execute("SELECT COALESCE(MAX(id), 0) FROM public._changelog")
+                cur.execute("SELECT MAX(id) FROM public._changelog")
                 row = cur.fetchone()
                 return row[0] if row else None
         except Exception:
@@ -510,8 +510,7 @@ class Gateway:
             return None
 
     async def _proxy_rest_request(self, request: Request, url_map: dict[str, str] | None = None) -> Response:
-        """Reverse-proxy an HTTP request to an internal service, streaming the response through. A request that may
-        write is logged as an ``http_request`` with the changelog ids it spanned, so the rows it wrote name it."""
+        """Reverse-proxy an HTTP request to an internal service, streaming the response through."""
         url_map = self.rest_proxy_urls if url_map is None else url_map
         service_name = request.path_params["service_name"]
         base_url = url_map.get(service_name)
@@ -524,7 +523,9 @@ class Gateway:
         changelog_before = self._query_changelog_id()
 
         async def log_write(status: int) -> None:
-            # Once the response has ended: a streamed one (an MCP call's SSE answer) writes after its headers.
+            changelog_after = self._query_changelog_id()
+            if changelog_after is None or changelog_after <= (changelog_before or 0):
+                return  # only a request that wrote changelog rows is a write window
             await self._log_event({
                 "event_type": "http_request",
                 "route": "website" if url_map is self.website_urls else "svc",
@@ -534,7 +535,7 @@ class Gateway:
                 "status": status,
                 **self._attribution(role),
                 "changelog_id_before": changelog_before,
-                "changelog_id_after": self._query_changelog_id(),
+                "changelog_id_after": changelog_after,
             })
 
         return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server,
@@ -1196,8 +1197,7 @@ class Gateway:
         return event_id
 
     async def _serve_changes(self, request: Request) -> Response:
-        """The env's changelog rows after ``after_id``, oldest first and at most ``limit`` of them, each with the actors
-        whose write window holds it (see ``changes``); ``has_more`` says a later page has rows."""
+        """The changelog rows after ``after_id`` (at most ``limit``, oldest first), each with its actors (see ``changes``)."""
         try:
             after_id = int(request.query_params.get("after_id", 0))
             limit = int(request.query_params.get("limit", CHANGES_PAGE_DEFAULT))

@@ -11,8 +11,7 @@ its response streamed through, under four invariants:
 - the role header is the gateway's to write: the client's copies are dropped and the role the gateway attributed
   the request to goes in their place, and a POST to a backing MCP server's own endpoint gets the same treatment
   inside its JSON-RPC ``params._meta``;
-- the upstream response and the client it came through are closed when the response ends, iterated or not, and
-  the caller's ``on_done`` is awaited then, so it sees the upstream's work finished, a streamed body included.
+- the upstream response and the client it came through are closed when the response ends, iterated or not.
 
 A backing server's env card names its endpoints relative to itself; :func:`rewrite_child_card` roots them under
 ``/svc/{key}`` so they resolve against the env's address, keeping the gateway's own routes where the gateway offers
@@ -58,8 +57,7 @@ async def forward(request: Request, base_url: str, *, role: str, timeout: httpx.
     """Forward `request` to the service at `base_url` as `role` and stream the response through. `mcp_server` says
     the service is a backing MCP server, whose own endpoint takes the role in its JSON-RPC `_meta` as well as in the
     header. A 400 names a request-target the proxy cannot route; a 502 names an upstream that never answered.
-    `on_done` is awaited with the status once the response has ended: at once for one the proxy makes itself, after
-    the last byte (or the client leaving) for one it streams."""
+    `on_done` is awaited with the status once the response has ended, after its last byte when streamed."""
     try:
         target_url = upstream_url(base_url, request)
     except ValueError as e:  # an escaped slash inside the route prefix; refuse rather than forward a wrong path

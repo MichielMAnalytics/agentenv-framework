@@ -1771,8 +1771,7 @@ async def test_gateway_consistent_mode(multi_env, environment_universe_artifact)
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, email_service_artifact):
-    """GET /changes joins the env's changelog onto the gateway's write windows: every row a call wrote names the role
-    and tool that wrote it, and the call's trajectory result carries the changelog ids it spanned."""
+    """Every changelog row a tool call wrote names its role and tool, and the call's result carries the ids it spanned."""
     email_ref = mcp_server_envs["email"]
     email_env = Env.get(email_ref.id, version=email_ref.version)
     try:
@@ -1798,7 +1797,7 @@ async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, 
 
             events = await _trajectory_events(client, gw)
             results = [e for e in events if e["event_type"] == "tool_call_result"][-2:]
-            assert all(e["changelog_id"] > e["changelog_id_before"] for e in results), results
+            assert all(e["changelog_id"] > (e["changelog_id_before"] or 0) for e in results), results
     finally:
         await email_env.close()
 
@@ -1807,9 +1806,7 @@ async def test_gateway_changes_name_the_role_behind_each_write(mcp_server_envs, 
 @pytest.mark.integration
 async def test_gateway_changes_name_the_request_behind_a_write_through_the_rest_proxy(mcp_server_envs,
                                                                                       email_service_artifact):
-    """A client that reaches a backing server through the REST proxy instead of the gateway's tools (here an MCP
-    client on /svc/mcp-email/mcp, whose answer streams as SSE) makes a logged write window too, closed when the
-    answer has ended, so the rows its call wrote name the request and its role."""
+    """An MCP client writing through /svc/mcp-email/mcp (an SSE answer) is a write window too, named by its role."""
     email_ref = mcp_server_envs["email"]
     email_env = Env.get(email_ref.id, version=email_ref.version)
     try:

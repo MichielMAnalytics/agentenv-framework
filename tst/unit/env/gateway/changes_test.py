@@ -1,5 +1,4 @@
-"""Who changed what (urn:agentenv:changes/v1): every write the gateway serves is a window of changelog ids in its
-trajectory, and GET /changes joins the changelog's rows onto those windows, naming the role and the call behind each."""
+"""Who changed what (urn:agentenv:changes/v1): GET /changes joins changelog rows onto the gateway's write windows."""
 from __future__ import annotations
 
 import asyncio
@@ -58,7 +57,7 @@ def test_a_row_is_attributed_to_the_call_whose_window_holds_it():
           "tool": "drive_touch_file", "role": None}],
         [{"kind": "request", "event_id": "event_6", "role": "default", "request": {
             "route": "website", "service": "mail", "method": "POST", "path": "/api/drafts", "status": 201}}],
-        [],  # written by nothing the gateway served
+        [],
     ]
 
 
@@ -69,18 +68,18 @@ def test_overlapping_calls_both_name_a_row_written_between_them():
     changes.observe(_result("event_2", 0, 2))
     changes.observe(_result("event_1", 0, 3))
     assert [[a["event_id"] for a in who] for who in changes.actors([1, 2, 3])] == [
-        ["event_2", "event_1"], ["event_2", "event_1"], ["event_1"]]  # in the order the calls finished
+        ["event_2", "event_1"], ["event_2", "event_1"], ["event_1"]]
 
 
 def test_calls_without_a_write_window_attribute_nothing():
     changes = ChangeAttribution()
     for event in (
-        _call("event_1", "read_only", "default"), _result("event_1", 4, 4),        # wrote nothing
-        _call("event_3", "no_changelog", "default"), _result("event_3", None, None),  # the env keeps no changelog
-        _call("event_5", "list_website_urls", "default"),                            # gateway-native: no window
+        _call("event_1", "read_only", "default"), _result("event_1", 4, 4),
+        _call("event_3", "no_changelog", "default"), _result("event_3", None, None),
+        _call("event_5", "list_website_urls", "default"),
         {"event_type": "tool_call_result", "event_id": "event_6", "tool_call_event_id": "event_5", "tool_call_result": {}},
-        _result("event_unknown", 0, 9),                                               # a result with no call
-        _call("event_7", "raised", "default"),                                        # never answered
+        _result("event_unknown", 0, 9),
+        _call("event_7", "raised", "default"),
     ):
         changes.observe(event)
     assert changes.actors([1, 4, 5, 9]) == [[], [], [], []]
@@ -100,8 +99,8 @@ class _Changelog:
                           "schema_name": "mail", "table_name": table, "operation": "INSERT", "row_id": row_id,
                           "summary": f"Inserted: {row_id}", "changed_fields": {"id": row_id}})
 
-    def max_id(self) -> int:
-        return len(self.rows)
+    def max_id(self) -> int | None:
+        return len(self.rows) or None
 
     def cursor(self):
         log = self
@@ -137,7 +136,7 @@ class _WritingSession:
         return SimpleNamespace(tools=[TOOL])
 
     async def call_tool(self, name, arguments, *args, meta=None, **kwargs):
-        self.changelog.write("messages", f"m{self.changelog.max_id() + 1}")
+        self.changelog.write("messages", f"m{len(self.changelog.rows) + 1}")
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
 
@@ -208,7 +207,7 @@ async def test_tool_calls_record_the_changelog_ids_they_spanned_and_changes_name
         await gw._close_child_sessions()
 
     results = [e for e in _trajectory()[before:] if e["event_type"] == "tool_call_result"]
-    assert [(e["changelog_id_before"], e["changelog_id"]) for e in results] == [(0, 1), (1, 2)]
+    assert [(e["changelog_id_before"], e["changelog_id"]) for e in results] == [(None, 1), (1, 2)]
     status, body = await _http(gw, "GET", "/changes")
     changes = json.loads(body)
     assert status == 200 and changes["has_more"] is False
@@ -246,7 +245,7 @@ async def test_a_write_through_the_rest_proxy_is_a_logged_window_and_a_read_is_n
     assert [{k: e[k] for k in ("route", "service", "method", "path", "status", "role", "changelog_id_before",
                                "changelog_id_after")} for e in requests] == [
         {"route": "website", "service": "mail", "method": "POST", "path": "/api/drafts", "status": 201,
-         "role": "bob@example.com", "changelog_id_before": 0, "changelog_id_after": 1},
+         "role": "bob@example.com", "changelog_id_before": None, "changelog_id_after": 1},
         {"route": "svc", "service": "mail", "method": "PATCH", "path": "/api/drafts/d1", "status": 200,
          "role": "default", "changelog_id_before": 1, "changelog_id_after": 2},
     ]
@@ -262,8 +261,7 @@ async def test_a_write_through_the_rest_proxy_is_a_logged_window_and_a_read_is_n
 
 @pytest.mark.asyncio
 async def test_a_write_made_while_the_response_streams_is_inside_the_window(monkeypatch):
-    """An upstream that answers headers first and writes while its body streams, as an MCP server's SSE answer to a
-    tools/call does: the window closes when the body has ended, not when the headers came in."""
+    """Headers first, then a write while the body streams (an MCP SSE answer): the window closes at the body's end."""
     changelog = _Changelog()
 
     async def body():
@@ -281,9 +279,69 @@ async def test_a_write_made_while_the_response_streams_is_inside_the_window(monk
 
     assert status == 200 and body_bytes.endswith(b'{"result": {}}\n\n')
     [logged] = [e for e in _trajectory()[before:] if e["event_type"] == "http_request"]
-    assert (logged["path"], logged["changelog_id_before"], logged["changelog_id_after"]) == ("/mcp", 0, 1)
+    assert (logged["path"], logged["changelog_id_before"], logged["changelog_id_after"]) == ("/mcp", None, 1)
     _, changes = await _http(gw, "GET", "/changes")
     assert [a["role"] for a in json.loads(changes)["changes"][0]["actors"]] == ["carol@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_a_write_window_does_not_hold_the_stream_back(monkeypatch):
+    changelog = _Changelog()
+    gate = asyncio.Event()
+
+    async def body():
+        yield b"a" * 1024
+        await gate.wait()
+        changelog.write("messages", "m1")
+        yield b"b" * 1024
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body()))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(changelog, rest_proxy_urls={"mcp-mail": "http://mail:8000"})
+    before = len(_trajectory())
+    first_chunk = asyncio.Event()
+    received = False
+
+    async def receive():
+        nonlocal received
+        if not received:
+            received = True
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+        await asyncio.sleep(3600)
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            first_chunk.set()
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1", "method": "POST",
+             "scheme": "http", "path": "/svc/mcp-mail/mcp", "raw_path": b"/svc/mcp-mail/mcp", "query_string": b"",
+             "root_path": "", "server": ("g", 80), "client": ("c", 1), "headers": []}
+    task = asyncio.create_task(gw._mcp.streamable_http_app()(scope, receive, send))
+    await asyncio.wait_for(first_chunk.wait(), 5)
+    assert not [e for e in _trajectory()[before:] if e["event_type"] == "http_request"]
+    gate.set()
+    await asyncio.wait_for(task, 5)
+    [logged] = [e for e in _trajectory()[before:] if e["event_type"] == "http_request"]
+    assert (logged["changelog_id_before"], logged["changelog_id_after"]) == (None, 1)
+
+
+@pytest.mark.asyncio
+async def test_a_mutating_request_that_wrote_nothing_is_not_logged(monkeypatch):
+    changelog = _Changelog()
+    changelog.write("messages", "m1")
+
+    async def body():
+        yield b'{"jsonrpc": "2.0", "id": 1, "result": {"parts": []}}'
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body()))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    gw = _gateway(changelog, rest_proxy_urls={"mail": "http://mail-backend"})
+    before = len(_trajectory())
+
+    for method, path in (("POST", "/svc/mail/agentenv"), ("PUT", "/svc/mail/api/drafts/d1"), ("DELETE", "/svc/mail/x")):
+        assert (await _http(gw, method, path, body=b'{"method": "data/get"}'))[0] == 200
+
+    assert [e for e in _trajectory()[before:] if e["event_type"] == "http_request"] == []
 
 
 @pytest.mark.asyncio
@@ -296,10 +354,10 @@ async def test_changes_pages_by_after_id_and_limit():
     status, body = await _http(gw, "GET", "/changes?after_id=1&limit=2")
     page = json.loads(body)
     assert status == 200 and [c["id"] for c in page["changes"]] == [2, 3] and page["has_more"] is True
-    assert all(c["actors"] == [] for c in page["changes"])  # written before any call the gateway served
+    assert all(c["actors"] == [] for c in page["changes"])
     _, body = await _http(gw, "GET", "/changes?after_id=3&limit=2")
     assert [c["id"] for c in json.loads(body)["changes"]] == [4, 5] and json.loads(body)["has_more"] is False
-    assert changelog.queries[-1][1] == (3, 3)  # one row past the page tells whether another follows
+    assert changelog.queries[-1][1] == (3, 3)
 
 
 @pytest.mark.asyncio
@@ -321,7 +379,7 @@ async def test_an_env_without_a_changelog_says_so():
     assert status == 404 and json.loads(body)["error"] == "this env keeps no changelog"
 
 
-def test_an_empty_changelog_reads_zero_so_a_first_write_has_a_window():
+def test_an_empty_changelog_still_reads_null():
     queries = []
 
     class _Conn:
@@ -337,10 +395,17 @@ def test_an_empty_changelog_reads_zero_so_a_first_write_has_a_window():
                     queries.append(sql)
 
                 def fetchone(self):
-                    return (0,)
+                    return (None,)
             return _Cursor()
 
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[])
     gw._db_conn = _Conn()
-    assert gw._query_changelog_id() == 0
-    assert queries == ["SELECT COALESCE(MAX(id), 0) FROM public._changelog"]
+    assert gw._query_changelog_id() is None
+    assert queries == ["SELECT MAX(id) FROM public._changelog"]
+
+
+def test_a_first_write_on_an_empty_changelog_still_has_a_window():
+    changes = ChangeAttribution()
+    changes.observe(_call("event_1", "mail_send_message", "default"))
+    changes.observe(_result("event_1", None, 2))
+    assert [[a["event_id"] for a in who] for who in changes.actors([1, 2, 3])] == [["event_1"], ["event_1"], []]

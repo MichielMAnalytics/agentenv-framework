@@ -155,9 +155,7 @@ class SnapshotEnvTaskStep(TaskStep):
     Output: ``context.metadata["env_snapshotted_universes"][self.id]`` =
     ``{"id", "version"}``. Fails the step if any service fails to export.
 
-    ``include_env_changes`` also records who changed what: the gateway's changelog rows, each with the
-    actors behind it (urn:agentenv:changes/v1), as JSONL in the object store, under
-    ``context.metadata["env_changes"][env_id]``. Like ``include_env_trajectory`` it is best-effort.
+    ``include_env_changes`` also stores who changed what (urn:agentenv:changes/v1) under ``metadata["env_changes"]``.
     """
 
     type: ClassVar[str] = "snapshot_env"
@@ -384,8 +382,7 @@ class SnapshotEnvTaskStep(TaskStep):
         entry["event_count"] = event_count
 
     async def _capture_env_changes(self, entry: dict, context: TaskStepContext, env_id: str, deployed) -> None:
-        """Page through the gateway's changes into a JSONL upload, one row per line, and fill ``entry`` with its url
-        and how many rows have one actor (attributed) or several (written while calls overlapped)."""
+        """Page the gateway's changes into a JSONL upload; fill ``entry`` with its url and attribution counts."""
         method, url = _changes_route(deployed, self.gateway_url)
         counts = {"change_count": 0, "attributed_count": 0, "ambiguous_count": 0}
         timeout = httpx.Timeout(_CHANGES_CAPTURE_BUDGET_SECONDS, connect=_CONNECT_TIMEOUT_SECONDS)

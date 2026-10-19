@@ -1,13 +1,4 @@
-"""Who made each change to an env's state (urn:agentenv:changes/v1).
-
-Every write the gateway serves is recorded in its trajectory with the changelog ids it spanned: a tool call's
-``tool_call_result`` carries ``changelog_id_before`` and ``changelog_id``, a trigger's tool action its
-``internal_tool_call`` and a request that may write through the REST proxy its ``http_request``, logged once the
-response has ended, each with ``changelog_id_before`` / ``changelog_id_after``. A changelog row whose id lies in ``(before, after]`` of such a
-window was written while that call ran. :class:`ChangeAttribution` keeps those windows as the gateway logs them
-and joins the changelog's rows onto them: one actor for a row one call wrote, several for a row written while
-calls overlapped (``performance`` mode serves calls concurrently), none for a write the gateway did not serve.
-"""
+"""Who made each change to an env's state (urn:agentenv:changes/v1): changelog rows joined onto the gateway's write windows."""
 from __future__ import annotations
 
 import heapq
@@ -15,10 +6,10 @@ from typing import Any
 
 
 class ChangeAttribution:
-    """The write windows of the trajectory events the gateway has logged since it started."""
+    """The write windows (changelog ids before and after a call) of the trajectory events logged since start."""
 
     def __init__(self) -> None:
-        self._calls: dict[str, dict] = {}  # tool_call event id -> its actor, until its result closes the window
+        self._calls: dict[str, dict] = {}
         self._windows: list[tuple[int, int, int, dict]] = []  # (before, after, order, actor)
 
     def observe(self, event: dict) -> None:
@@ -43,11 +34,12 @@ class ChangeAttribution:
                 **_who(event)})
 
     def _add(self, before: Any, after: Any, actor: dict) -> None:
+        before = 0 if before is None else before  # MAX(id) of an empty changelog reads null
         if isinstance(before, int) and isinstance(after, int) and after > before:
             self._windows.append((before, after, len(self._windows), actor))
 
     def actors(self, row_ids: list[int]) -> list[list[dict]]:
-        """For each of ``row_ids`` (ascending), the actors whose window holds it, in the order the calls finished."""
+        """For each of ``row_ids`` (ascending), the actors whose ``(before, after]`` window holds it, by finish order."""
         windows = sorted(self._windows)
         open_windows: list[tuple[int, int, dict]] = []  # a heap of (after, order, actor)
         out: list[list[dict]] = []
