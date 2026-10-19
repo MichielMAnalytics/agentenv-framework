@@ -297,6 +297,45 @@ async def test_start_spares_the_runs_a_live_runner_owns_and_fails_a_dead_process
 
 
 @pytest.mark.asyncio
+async def test_only_the_runner_running_a_run_can_cancel_it(docs, monkeypatch):
+    from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
+
+    torn_down, started, release, cancelled = [], asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def teardown_run(context):
+        torn_down.append(context.metadata["workflow_id"])
+        return TeardownReport()
+
+    async def on_run(kwargs):
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    owner, other = LocalRunner(workers=2), LocalRunner(workers=1)
+    finishes, stopped = await owner.submit("t1", 1), await owner.submit("t1", 1)
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        assert await other.cancel(finishes.run_id) is False
+        assert run_store.get_run(finishes.run_id).status is RunStatus.RUNNING and not cancelled.is_set()
+        assert await owner.cancel(stopped.run_id) is True
+        assert (await _drain(owner, stopped.run_id)).status is RunStatus.CANCELED and cancelled.is_set()
+        release.set()
+        assert (await _drain(owner, finishes.run_id)).status is RunStatus.COMPLETED
+        await _settled(owner, finishes.run_id)
+    finally:
+        await other.stop()
+        await owner.stop()
+
+    assert sorted(torn_down) == sorted([finishes.run_id, stopped.run_id])
+
+
+@pytest.mark.asyncio
 async def test_start_reconciles_an_orphan_behind_many_terminal_runs(docs):
     # Reconcile is by status, not a window of the newest records: an orphan older than a
     # large backlog of finished runs must still be failed.

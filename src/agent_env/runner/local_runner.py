@@ -143,17 +143,15 @@ class LocalRunner(Runner):
         return record
 
     async def cancel(self, run_id: str) -> bool:
+        """Cancel a run this runner is running; False for any other, whose record it leaves to the process running it."""
         record = run_store.get_run(run_id)
-        if record is None or record.status.is_terminal:
-            return False
         task = self._inflight.get(run_id)
-        if task is not None:
-            # Signal only. `_run` is the sole writer of the terminal state, so a cancel that
-            # races the run's completion can't mislabel a finished run (see `_run`). This
-            # preempts Task.run() at its current await; it unwinds its in-flight step cleanly.
-            task.cancel()
-        else:
-            run_store.mark_terminal(run_id, RunStatus.CANCELED)   # no live task here (defensive)
+        if record is None or record.status.is_terminal or task is None:
+            return False
+        # Signal only. `_run` is the sole writer of the terminal state, so a cancel that
+        # races the run's completion can't mislabel a finished run (see `_run`). This
+        # preempts Task.run() at its current await; it unwinds its in-flight step cleanly.
+        task.cancel()
         return True
 
     # --- execution ---------------------------------------------------------

@@ -8,6 +8,7 @@ import logging
 import os
 import signal
 import threading
+import types
 
 import pytest
 from click.testing import CliRunner
@@ -171,6 +172,40 @@ def test_ctrl_c_with_keep_also_tears_down_a_run_that_already_finished(monkeypatc
     assert result.exit_code == 130, result.output
     assert _ids(torn_down) == ["sb-1", "sb-2"]
     assert "Holding" not in result.output
+
+
+class _CancelledElsewhere(_Deploys):
+    """Its first run is asked to cancel through another runner while it runs, then ends; the second ends only once
+    the first has."""
+
+    def __init__(self, other):
+        super().__init__()
+        self.other, self.first_ended, self.refused = other, asyncio.Event(), []
+
+    async def run(self, context, **kwargs):
+        first = not self.contexts
+        await super().run(context, **kwargs)
+        if first:
+            self.refused.append(await self.other.cancel(context.metadata["workflow_id"]))
+            self.first_ended.set()
+        else:
+            await self.first_ended.wait()
+        return context
+
+
+def test_a_cancel_another_runner_cant_carry_out_leaves_a_kept_run_kept_and_torn_down(monkeypatch, tmp_path, torn_down):
+    def sleep(_):
+        signal.raise_signal(signal.SIGINT)
+
+    monkeypatch.setattr(task_run, "time", types.SimpleNamespace(sleep=sleep))
+    task = _CancelledElsewhere(local_runner.LocalRunner())
+
+    result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2", "--keep")
+
+    assert result.exit_code == 0, result.output
+    assert task.refused == [False]
+    assert {r.status for r in run_store.list_runs(task_id="t")} == {RunStatus.COMPLETED}
+    assert "Holding 2 sandboxes up" in result.output and _ids(torn_down) == ["sb-1", "sb-2"]
 
 
 def test_keep_writes_the_context_of_a_run_that_failed(monkeypatch, tmp_path, torn_down):
