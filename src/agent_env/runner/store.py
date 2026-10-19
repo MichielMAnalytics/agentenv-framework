@@ -95,6 +95,15 @@ def set_running(run_id: str) -> None:
     )
 
 
+def see(run_id: str) -> None:
+    """Mark a non-terminal run as still seen by its owner: what keeps an owner on another host counting as alive."""
+    _docs().update(
+        RUNS_COLLECTION,
+        Filter(conditions={"run_id": [Eq(run_id)], "status": _NON_TERMINAL}),
+        UpdateSpec(set={"owner.seen": _now()}),
+    )
+
+
 def mark_terminal(run_id: str, status: RunStatus, error: Optional[str] = None) -> None:
     """Move a run to a terminal status, but only from QUEUED/RUNNING — so a run that a
     concurrent cancel already terminated is left as-is (cancel wins, and it's idempotent)."""

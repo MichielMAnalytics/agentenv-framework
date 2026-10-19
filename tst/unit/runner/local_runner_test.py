@@ -8,6 +8,7 @@ import asyncio
 import socket
 import subprocess
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -333,6 +334,54 @@ async def test_only_the_runner_running_a_run_can_cancel_it(docs, monkeypatch):
         await owner.stop()
 
     assert sorted(torn_down) == sorted([finishes.run_id, stopped.run_id])
+
+
+async def _until(condition, timeout=5.0):
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not condition():
+        if asyncio.get_event_loop().time() > deadline:
+            raise AssertionError("condition never held")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_run_owned_on_another_host_is_failed_once_its_owner_stops_seeing_it(docs, monkeypatch):
+    monkeypatch.setattr(LocalRunner, "OWNER_SEEN_SECONDS", 0.01)
+    monkeypatch.setattr(LocalRunner, "OWNER_LEASE_SECONDS", 0.5)
+    now = datetime.now(timezone.utc)
+    for run_id, seen in (("gone", now - timedelta(seconds=10)), ("going", now)):
+        record = RunRecord(run_id=run_id, runner="local", task_id="t", task_version=1, instance_id=run_id,
+                           status=RunStatus.RUNNING)
+        docs.insert(run_store.RUNS_COLLECTION, {**record.to_dict(), "owner": {"host": "elsewhere", "pid": 1,
+                                                                             "seen": seen.isoformat()}})
+    runner = LocalRunner(workers=1)
+    try:
+        await runner.start()
+        assert (run_store.get_run("gone").status, run_store.get_run("going").status) == (RunStatus.FAILED,
+                                                                                        RunStatus.RUNNING)
+        await _until(lambda: run_store.get_run("going").status is RunStatus.FAILED)
+    finally:
+        await runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_runner_keeps_seeing_the_runs_it_is_running(docs, monkeypatch):
+    monkeypatch.setattr(LocalRunner, "OWNER_SEEN_SECONDS", 0.01)
+    started = asyncio.Event()
+
+    async def on_run(_):
+        started.set()
+        await asyncio.sleep(30)
+
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 1)
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        first_seen = run_store.get_run(handle.run_id).owner["seen"]
+        await _until(lambda: run_store.get_run(handle.run_id).owner["seen"] > first_seen)
+    finally:
+        await runner.stop()
 
 
 @pytest.mark.asyncio
