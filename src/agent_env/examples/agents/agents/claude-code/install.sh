@@ -25,7 +25,7 @@ AGENT_FILES="a2a_server.py claude_bridge.py kit.py requirements.txt run.sh"
 
 case $mode in
   container)
-    root=/opt/agentenv-agent
+    root=/opt/agentenv-agent-$port  # one per agent: two in a container listen on two ports
     workdir=
     on() { docker exec -u 0 "$target" sh -c "$1"; }
     put() { docker cp "$1" "$target:$2" > /dev/null; }
@@ -66,6 +66,7 @@ checked() {  # checked FILE SHA256: FILE is what was published, or the install s
   [ "$(sha256 "$1")" = "$2" ] || { echo "$(basename "$1") doesn't match its published checksum" >&2; exit 1; }
 }
 quoted() { printf "'%s'" "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
+r=$(quoted "$root")  # $root, as the commands run in the target read it
 
 # Beside this script, in the work dir the sandbox's teardown removes, so a killed install leaves nothing elsewhere.
 stage=$(mktemp -d "$here/../stage.XXXXXX")
@@ -91,30 +92,30 @@ chmod 0755 "$stage/claude" "$stage/uv-$uv_cpu-unknown-linux-musl/uv"
     printf '%s=%s\n' "$name" "$(quoted "${!name:-}")"
   done
   [ -z "${AGENT_TRUST_ENV:-}" ] || printf '%s\n' "$AGENT_TRUST_ENV"
-  printf 'A2A_PORT=%s\nCLAUDE_CONFIG_DIR=%s\n' "$port" "$root/claude"
+  printf 'A2A_PORT=%s\nCLAUDE_CONFIG_DIR=%s\n' "$(quoted "$port")" "$(quoted "$root/claude")"
   printf 'DISABLE_AUTOUPDATER=1\nCLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n'
 } > "$stage/agent.env"
 
-on "mkdir -p '$root/bin' '$root/app' '$root/claude'"
+on "mkdir -p $r/bin $r/app $r/claude"
 put "$stage/claude" "$root/bin/claude"
 put "$stage/uv-$uv_cpu-unknown-linux-musl/uv" "$root/bin/uv"
 put "$stage/agent.env" "$root/agent.env"
 for file in $AGENT_FILES; do
   put "$here/$file" "$root/app/$file"
 done
-on "chmod 0600 '$root/agent.env' && chmod 0755 '$root/bin/claude' '$root/bin/uv' '$root/app/run.sh'"
+on "chmod 0600 $r/agent.env && chmod 0755 $r/bin/claude $r/bin/uv $r/app/run.sh"
 
 # A private Python, uv's own build of it and never the target's, with the agent's requirements; no cache is left behind.
-on "cd '$root' && export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR='$root/python' \
-  UV_CACHE_DIR='$root/cache' && bin/uv venv --quiet --python $PYTHON_VERSION venv \
+on "cd $r && export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR=$r/python \
+  UV_CACHE_DIR=$r/cache && bin/uv venv --quiet --python $PYTHON_VERSION venv \
   && bin/uv pip install --quiet --python venv/bin/python -r app/requirements.txt \
-  && rm -rf '$root/cache'"
+  && rm -rf $r/cache"
 
 # An earlier install's agent, if there is one, gives up its port.
-on "[ -f '$root/agent.pid' ] && kill \$(cat '$root/agent.pid') 2>/dev/null; rm -f '$root/agent.pid'; true"
+on "[ -f $r/agent.pid ] && kill \$(cat $r/agent.pid) 2>/dev/null; rm -f $r/agent.pid; true"
 
 if [ "$mode" = container ]; then
-  docker exec -d -u 0 "$target" sh -c "exec '$root/app/run.sh' '$root' > '$root/agent.log' 2>&1"
+  docker exec -d -u 0 "$target" sh -c "exec $r/app/run.sh $r > $r/agent.log 2>&1"
 else
   mkdir -p "$workdir"
   cd "$workdir"
@@ -124,10 +125,10 @@ fi
 # Done once the agent answers on its port; an agent that exits first fails the install with the end of its log.
 health="import urllib.request; urllib.request.urlopen('http://127.0.0.1:$port/health', timeout=2)"
 for _ in $(seq "$START_TIMEOUT_S"); do
-  on "'$root/venv/bin/python' -c \"$health\"" 2> /dev/null && exit 0
-  on "[ ! -f '$root/agent.pid' ] || kill -0 \$(cat '$root/agent.pid')" 2> /dev/null || break
+  on "$r/venv/bin/python -c \"$health\"" 2> /dev/null && exit 0
+  on "[ ! -f $r/agent.pid ] || kill -0 \$(cat $r/agent.pid)" 2> /dev/null || break
   sleep 1
 done
 echo "the agent didn't start; the end of its log:" >&2
-on "tail -n 40 '$root/agent.log'" >&2 || true
+on "tail -n 40 $r/agent.log" >&2 || true
 exit 1

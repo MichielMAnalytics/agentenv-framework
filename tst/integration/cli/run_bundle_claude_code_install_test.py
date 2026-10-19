@@ -24,6 +24,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
 TASK_IMAGES = Path(__file__).resolve().parents[2] / "data" / "claude_code_install"
 NOTES = "notes-from-the-task"
+A2A_PORT = 8000
 SKILL_BODY = "Read the task's notes first."
 SKILL_MD = f"---\nname: notes\ndescription: Where the task's notes are.\n---\n{SKILL_BODY}\n"
 # The installed skill's last line, as the CLI's shell finds it.
@@ -65,31 +66,42 @@ def state(monkeypatch, tmp_path, endpoint):
         reset_config()
 
 
-def _bundle(root: Path, task_image: str | None) -> Path:
-    """A task that installs the default agent, into a container built from ``task_image`` or onto the host, gives it
-    a skill, and asks it to read the task's notes."""
+def _slug(name: str) -> str:
+    return name.replace(" ", "-")
+
+
+def _bundle(root: Path, task_image: str | None, agents: tuple[str, ...] = ("coder",)) -> Path:
+    """A task that installs the default agent as each of ``agents``, on ports from 8000, into a container built from
+    ``task_image`` or onto the host, then gives each a skill and asks it to read the task's notes, in turn."""
+    ports = [A2A_PORT + i for i in range(len(agents))]
     steps = [{"id": "box", "type": "deploy_sandbox", "sandbox_name": "box", "sandbox_mode": "vm",
-              "sandbox_type": "local", "exposed_ports": [8000]}]
-    install = {"id": "coder", "type": "install_agent", "sandbox_name": "box", "agent_name": "coder"}
+              "sandbox_type": "local", "exposed_ports": ports}]
+    after = ["box"]
     if task_image is not None:
         shutil.copytree(TASK_IMAGES / task_image, root / "artifacts" / "task-image")
         steps.append({"id": "repo", "type": "run_docker_container", "sandbox_name": "box", "container_name": "repo",
-                      "docker_context_artifact_id": "task-image", "ports": [8000], "depends_on": ["box"]})
-        install |= {"container_name": "repo", "depends_on": ["repo"]}
-    else:
-        install["depends_on"] = ["box"]
+                      "docker_context_artifact_id": "task-image", "ports": ports, "depends_on": after})
+        after = ["repo"]
+    for name, port in zip(agents, ports):
+        install = {"id": f"install-{_slug(name)}", "type": "install_agent", "sandbox_name": "box", "agent_name": name,
+                   "a2a_port": port, "depends_on": after}
+        steps.append(install | ({"container_name": "repo"} if task_image is not None else {}))
+        after = [install["id"]]
     (root / "skills/notes").mkdir(parents=True)
     (root / "skills/notes/SKILL.md").write_text(SKILL_MD)
-    steps += [
-        install,
-        {"id": "skill", "type": "add_skills", "agent_name": "coder", "skills": [{"skill_artifact_id": "notes"}],
-         "depends_on": ["coder"]},
-        {"id": "ask", "type": "prompt_agent", "agent_name": "coder", "prompt_id": "ask", "depends_on": ["skill"],
-         "prompt": "What do the task's notes say?"},
-        {"id": "check", "type": "agent_prompt_response_verifier", "prompt_id": "ask", "verifier_id": "read",
-         "criteria": [{"type": "response_contains", "needles": [NOTES]}], "depends_on": ["ask"]},
-        {"id": "down", "type": "teardown_sandboxes", "sandbox_names": ["box"], "depends_on": ["check"]},
-    ]
+    for name in agents:
+        slug = _slug(name)
+        steps += [
+            {"id": f"skill-{slug}", "type": "add_skills", "agent_name": name,
+             "skills": [{"skill_artifact_id": "notes"}], "depends_on": after},
+            {"id": f"ask-{slug}", "type": "prompt_agent", "agent_name": name, "prompt_id": f"ask-{slug}",
+             "depends_on": [f"skill-{slug}"], "prompt": "What do the task's notes say?"},
+            {"id": f"check-{slug}", "type": "agent_prompt_response_verifier", "prompt_id": f"ask-{slug}",
+             "verifier_id": f"read-{slug}", "criteria": [{"type": "response_contains", "needles": [NOTES]}],
+             "depends_on": [f"ask-{slug}"]},
+        ]
+        after = [f"check-{slug}"]
+    steps.append({"id": "down", "type": "teardown_sandboxes", "sandbox_names": ["box"], "depends_on": after})
     (root / "tasks").mkdir()
     (root / "tasks/install.json").write_text(json.dumps(steps))
     return root
@@ -107,6 +119,17 @@ def test_install_agent_naming_no_agent_installs_claude_code_into_a_task_containe
     assert endpoint.tool_results() == [f"{NOTES}\n/workspace/task_repo\n{SKILL_BODY}"], seen
 
 
+def test_two_agents_installed_into_one_container_each_keep_their_own_install(state, endpoint):
+    """The second install leaves the first agent running: the first is asked after the second is installed."""
+    endpoint.respond = tool_then_answer("Bash", {"command": f"cat notes.txt; pwd; {READ_SKILL}"})
+
+    result = CliRunner().invoke(cli, ["run", str(_bundle(state / "bundle", "debian", agents=("coder", "helper")))])
+
+    seen = (result.output, endpoint.tool_results())
+    assert result.exit_code == 0 and "tasks/install.json v1: passed" in result.output, seen
+    assert endpoint.tool_results() == [f"{NOTES}\n/workspace/task_repo\n{SKILL_BODY}"] * 2, seen
+
+
 @pytest.mark.skipif(platform.system() != "Linux", reason="a host install needs a Linux host")
 def test_install_agent_with_no_container_installs_claude_code_onto_the_sandboxs_host(monkeypatch, state, endpoint):
     # A process on the host can't resolve host.docker.internal: the grants name the bridge address, which it reaches.
@@ -121,7 +144,8 @@ def test_install_agent_with_no_container_installs_claude_code_onto_the_sandboxs_
     endpoint.respond = tool_then_answer("Bash", {"command": f"echo {NOTES}; {READ_SKILL}"})
 
     try:
-        result = CliRunner().invoke(cli, ["run", str(_bundle(state / "bundle", None))])
+        # A name with a space, which the install's paths carry.
+        result = CliRunner().invoke(cli, ["run", str(_bundle(state / "bundle", None, agents=("code helper",)))])
     finally:
         grant_server(bridge, bridge).close()
 
