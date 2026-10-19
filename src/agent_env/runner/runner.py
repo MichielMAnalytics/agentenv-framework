@@ -116,7 +116,8 @@ class Runner(ABC):
         """Enqueue a run and return its handle immediately, without waiting for it.
 
         With ``instance_id`` the run continues that instance from its stored context, at ``metadata["start_step"]``.
-        A run whose ``metadata[KEEP_KEY]`` is set is left up when it ends: whoever submitted it tears it down."""
+        A run whose ``metadata[KEEP_KEY]`` is set and that ends on its own, passed or failed, is left up: whoever
+        submitted it tears it down. A cancelled run is torn down either way."""
 
     @abstractmethod
     async def status(self, run_id: str) -> Optional[RunRecord]:

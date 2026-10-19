@@ -329,25 +329,37 @@ async def test_what_a_run_deployed_is_torn_down_however_it_ends(docs, monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_a_kept_run_is_left_up(docs, monkeypatch):
+@pytest.mark.parametrize(("ending", "torn_down_count"), [("completes", 0), ("is cancelled", 1)])
+async def test_a_kept_run_is_left_up_unless_it_is_cancelled(docs, monkeypatch, ending, torn_down_count):
     from agent_env.runner import local_runner
+    from agent_env.task.teardown import TeardownReport
 
     torn_down = []
 
     async def teardown_run(context):
         torn_down.append(context)
+        return TeardownReport()
+
+    async def on_run(_):
+        started.set()
+        if ending == "is cancelled":
+            await asyncio.sleep(30)
 
     monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
-    _install_task(monkeypatch, _FakeTask())
+    started = asyncio.Event()
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
     runner = LocalRunner(workers=1)
     handle = await runner.submit("t1", 1, metadata={KEEP_KEY: True})
     try:
+        if ending == "is cancelled":
+            await asyncio.wait_for(started.wait(), 5)
+            await runner.cancel(handle.run_id)
         await _drain(runner, handle.run_id)
         await _settled(runner, handle.run_id)
     finally:
         await runner.stop()
 
-    assert torn_down == []
+    assert len(torn_down) == torn_down_count
 
 
 @pytest.mark.asyncio

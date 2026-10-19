@@ -76,8 +76,7 @@ class LocalRunner(Runner):
                 await asyncio.wait(stuck, timeout=self.ABANDON_WAIT_SECONDS)
                 # A run still going never reached its own teardown: remove what it has recorded so far.
                 left = [run_id for run_id, task in self._inflight.items()
-                        if not task.done() and run_id not in self._tearing_down and run_id in self._contexts
-                        and not self._contexts[run_id].metadata.get(KEEP_KEY)]
+                        if not task.done() and run_id not in self._tearing_down and run_id in self._contexts]
                 if left:
                     logger.warning("Shutting down without %d run(s) that didn't stop; tearing down what they recorded",
                                    len(left))
@@ -204,7 +203,9 @@ class LocalRunner(Runner):
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
         finally:
             try:
-                if context is not None and record.run_id not in self._abandoned and not context.metadata.get(KEEP_KEY):
+                kept = (context is not None and context.metadata.get(KEEP_KEY) and run_task is not None
+                        and run_task.done() and not run_task.cancelled())
+                if context is not None and record.run_id not in self._abandoned and not kept:
                     self._tearing_down.add(record.run_id)
                     try:
                         async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
