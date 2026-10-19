@@ -18,6 +18,7 @@ from typing import Optional
 
 from agent_env.runner import store as run_store
 from agent_env.runner.runner import KEEP_KEY, RunHandle, RunRecord, Runner, RunStatus
+from agent_env.task.store import new_instance_id
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ class LocalRunner(Runner):
         instance_id: Optional[str] = None,
     ) -> RunHandle:
         run_id = f"local-{uuid.uuid4().hex}"
-        instance_id = instance_id or uuid.uuid4().hex        # minted here so callers can link immediately
+        instance_id = instance_id or new_instance_id(task_id)        # minted here so callers can link immediately
         record = RunRecord(
             run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
             instance_id=instance_id, status=RunStatus.QUEUED,

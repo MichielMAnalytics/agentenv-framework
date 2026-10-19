@@ -18,8 +18,9 @@ from agent_env.cli.teardown_output import echo_teardown
 from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
+from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.store import register_task_instance, seed_task_instance_context
+from agent_env.task.store import new_instance_id, register_task_instance, seed_task_instance_context
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
@@ -385,11 +386,13 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
 
 
 def _stored(task, context: TaskStepContext) -> str:
-    """A new instance holding ``context``, for the runner to continue a run from."""
-    instance_id = uuid4().hex
-    register_task_instance(task.id, task.version, len(task.steps), context.metadata["start_step"],
-                           instance_id=instance_id)
-    seed_task_instance_context(instance_id, context)
+    """A new instance holding ``context``, for the runner to continue a run from, recorded where the task's run records
+    go."""
+    instance_id = new_instance_id(task.id)
+    with run_scope(task.id):
+        register_task_instance(task.id, task.version, len(task.steps), context.metadata["start_step"],
+                               instance_id=instance_id)
+        seed_task_instance_context(instance_id, context)
     return instance_id
 
 
