@@ -93,3 +93,15 @@ def test_an_at_local_tasks_run_stays_in_the_local_namespace(tmp_path, continued)
     [instance] = get_config().local_namespace_document_store().query(TASK_INSTANCES_COLLECTION, Filter())
     assert instance["instance_id"].startswith("@local/demo/t-") and instance["status"] == "completed"
     assert instance["context"]["metadata"].get("from_file") == ("yes" if continued else None)
+
+
+@pytest.mark.parametrize("k", ["1", "2"])
+def test_a_seeded_step_reports_under_the_id_it_ran_as(tmp_path, k):
+    _put("seeded", _Writes(id="verify-<week>", version=None, verifier_id="grade-<week>"))
+
+    result = _invoke("--id", "seeded", "--k", k, "--output-dir", str(tmp_path / "out"),
+                     "--context-json", _context_file(tmp_path, seed={"week": "3"}))
+
+    assert result.exit_code == 0, result.output
+    assert "Completed step [1/1]: writes_stored_run_test (id=verify-3)" in result.output
+    assert ("grade-3" if k == "1" else "score (verifier_id=grade-3): 1.0") in result.output

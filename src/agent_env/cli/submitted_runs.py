@@ -15,6 +15,7 @@ from agent_env.task import Task
 from agent_env.task.interrupts import Interrupts, tearing_down
 from agent_env.task.step_journal import replay_context
 from agent_env.task.store import TaskInstance, TaskStepStatus, find_task_instance, get_task_instance_store
+from agent_env.task.task import substitute_seed_in_steps
 from agent_env.task_step.context import TaskStepContext
 
 POLL_SECONDS = 2.0
@@ -28,6 +29,7 @@ class SubmittedRun:
     record: RunRecord | None = None
     instance: TaskInstance | None = None
     steps: set[tuple[str, str]] = field(default_factory=set)
+    definitions: list | None = None
 
     @property
     def done(self) -> bool:
@@ -110,8 +112,11 @@ async def _poll(runner, runs: list[SubmittedRun], step_lines) -> None:
 
 
 def _echo_step(run: SubmittedRun, step_id: str, passed: bool, step_lines) -> None:
-    i, step = next((i, step) for i, step in enumerate(run.task.steps) if step.id == step_id)
-    _echo(run.tag, f"{'Completed' if passed else 'Failed'} step [{i + 1}/{len(run.task.steps)}]: {step.type} "
+    if run.definitions is None:
+        run.definitions = substitute_seed_in_steps(
+            run.task.steps, ((run.instance.context or {}).get("metadata") or {}).get("seed"))
+    i, step = next((i, step) for i, step in enumerate(run.definitions) if step.id == step_id)
+    _echo(run.tag, f"{'Completed' if passed else 'Failed'} step [{i + 1}/{len(run.definitions)}]: {step.type} "
                    f"(id={step.id})", "green" if passed else "red")
     vid = getattr(step, "verifier_id", None)
     if not passed or not (step_lines or vid):
