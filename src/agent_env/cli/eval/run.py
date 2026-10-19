@@ -28,10 +28,11 @@ def _write_context(context, task_id, output_dir, prefix=""):
 
 def _echo_step(tasks):
     """Echo each step a run finishes as the runner records it, with the score of a verifier step."""
-    steps = {task.id: {step.id: (i, step, len(task.steps)) for i, step in enumerate(task.steps)} for task in tasks}
+    steps = {(task.id, task.version): {step.id: (i, step, len(task.steps)) for i, step in enumerate(task.steps)}
+             for task in tasks}
 
     def echo(run, result, instance):
-        i, step, total = steps[run.task_id][result.step_id]
+        i, step, total = steps[(run.task_id, instance.task_version)][result.step_id]
         passed = result.status == TaskStepStatus.SUCCESS
         click.echo(click.style(f"{run.tag} {'Completed' if passed else 'Failed'} step [{i + 1}/{total}]: {step.type} "
                                f"(id={step.id})", fg="green" if passed else "red"))
