@@ -81,8 +81,11 @@ or one of them only where it is used.
   what steps staged in `/tmp` under that id. Those processes are found through `/proc`, so on macOS
   they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
-  `a2a-default`, overridable by `configure(default_a2a_agent_id=...)`. Any step's agent field left unset
-  falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the default for it.
+  `@local/agentenv-framework/agents/claude-code`, the `agents` bundle's Claude Code
+  (`src/agent_env/examples/agents/`), overridable by `configure(default_a2a_agent_id=...)`. Any step's
+  agent field left unset falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the
+  default for it, pulling the built-in one from the installed `agents` bundle. Claude Code needs a model
+  endpoint serving Anthropic's Messages API, such as a LiteLLM gateway.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
