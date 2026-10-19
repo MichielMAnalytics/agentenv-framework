@@ -1,7 +1,9 @@
-"""``task run --submit`` and ``eval run --submit`` hand their runs to the configured ``[runner]`` and follow them
-from the run index: here ``LocalRunner``, which runs them in this process and tears them down itself."""
+"""``task run`` and ``eval run`` hand their runs to the configured ``[runner]`` and follow them from the run index:
+here ``LocalRunner``, which runs them in this process and tears them down itself."""
 
 import asyncio
+import importlib
+import json
 import logging
 import os
 import signal
@@ -18,6 +20,9 @@ from agent_env.runner import store as run_store
 from agent_env.runner.runner import RunHandle, Runner, RunRecord, RunStatus
 from agent_env.task import Task
 from agent_env.task.teardown import TeardownReport
+from agent_env.task_step.context import TaskStepContext
+
+eval_run = importlib.import_module("agent_env.cli.eval.run")  # the package's ``run`` is the click command
 
 pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 
@@ -26,11 +31,18 @@ class _Task:
     id, version, steps = "t", 1, []
 
     def __init__(self, nap=0.0, failed_steps=None):
-        self.nap, self.failed_steps, self.contexts = nap, failed_steps, []
+        self.nap, self.failed_steps, self.contexts, self.calls = nap, failed_steps, [], []
+        self.active = self.most_active = 0
 
-    async def run(self, context, **_):
+    async def run(self, context, **kwargs):
         self.contexts.append(context)
-        await asyncio.sleep(self.nap)
+        self.calls.append(kwargs)
+        self.active += 1
+        self.most_active = max(self.most_active, self.active)
+        try:
+            await asyncio.sleep(self.nap)
+        finally:
+            self.active -= 1
         if self.failed_steps:
             context.metadata["failed_steps"] = self.failed_steps
         return context
@@ -66,7 +78,7 @@ def _invoke(monkeypatch, task, *args, signal_after=None):
 def test_a_submitted_run_goes_through_the_runner_and_lands_in_the_run_index(monkeypatch, tmp_path, torn_down):
     task = _Task()
 
-    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--submit", "--output-dir", str(tmp_path))
+    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--output-dir", str(tmp_path))
 
     assert result.exit_code == 0, result.output
     assert "Submitted run local-" in result.output and "Run COMPLETED" in result.output
@@ -80,7 +92,7 @@ def test_a_submitted_run_goes_through_the_runner_and_lands_in_the_run_index(monk
 def test_a_failed_submitted_run_fails_the_command(monkeypatch, tmp_path, torn_down):
     task = _Task(failed_steps=[{"step_id": "s1"}])
 
-    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--submit", "--k", "2",
+    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--k", "2",
                      "--output-dir", str(tmp_path))
 
     assert result.exit_code == 1, result.output
@@ -91,7 +103,7 @@ def test_a_failed_submitted_run_fails_the_command(monkeypatch, tmp_path, torn_do
 def test_ctrl_c_cancels_the_submitted_runs_through_the_runner_and_exits_130(monkeypatch, tmp_path, torn_down):
     task = _Task(nap=30)
 
-    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--submit", "--k", "2",
+    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--k", "2",
                      "--output-dir", str(tmp_path), signal_after=1.0)
 
     assert result.exit_code == 130, result.output
@@ -100,12 +112,19 @@ def test_ctrl_c_cancels_the_submitted_runs_through_the_runner_and_exits_130(monk
     assert len(torn_down) == 2
 
 
-@pytest.mark.parametrize("flag", [["--keep"], ["--gateway-env-id", "g"]])
-def test_submit_refuses_what_acts_on_this_process_only(monkeypatch, flag):
-    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit", *flag)
+def test_a_context_json_is_stored_as_an_instance_the_runner_continues(monkeypatch, tmp_path, torn_down):
+    task = _Task()
+    saved = tmp_path / "context.json"
+    saved.write_text(json.dumps(TaskStepContext(metadata={"seeded": "yes"}).to_dict()))
 
-    assert result.exit_code == 2
-    assert "act on this process only" in result.output
+    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--context-json", str(saved), "--start-step", "1",
+                     "--gateway-env-id", "gw-run", "--output-dir", str(tmp_path))
+
+    assert result.exit_code == 0, result.output
+    [call], [context] = task.calls, task.contexts
+    assert call["start_step"] == 1 and context.metadata["seeded"] == "yes"
+    assert context.metadata["user_overrides"]["gateway_env_id"] == "gw-run"
+    assert call["instance_id"] == run_store.list_runs(task_id="t")[0].instance_id
 
 
 def test_an_eval_submits_every_task_k_times(monkeypatch, tmp_path, torn_down):
@@ -113,18 +132,25 @@ def test_an_eval_submits_every_task_k_times(monkeypatch, tmp_path, torn_down):
     monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: types.SimpleNamespace(
         id="e", version=1, tasks=[types.SimpleNamespace(task_id="t", task_version=1)])))
 
-    result = _invoke(monkeypatch, task, "eval", "run", "--id", "e", "--submit", "--k", "2")
+    monkeypatch.setattr(eval_run, "get_agent_env_client_id", lambda: "agent-env-cli/alex-dev")
+
+    result = _invoke(monkeypatch, task, "eval", "run", "--id", "e", "--k", "2")
 
     assert result.exit_code == 0, result.output
     assert result.output.count("PASSED") == 2 and "All 2 runs completed!" in result.output
     assert len(run_store.list_runs(task_id="t")) == 2
+    assert {c.metadata["agent_env_hub"]["caller"] for c in task.contexts} == {"agent-env-cli/alex-dev"}
 
 
-def test_an_eval_submit_leaves_concurrency_to_the_runner(monkeypatch):
-    result = _invoke(monkeypatch, _Task(), "eval", "run", "--id", "e", "--submit", "--max-concurrency", "2")
+def test_an_eval_keeps_at_most_max_concurrency_runs_in_flight(monkeypatch, torn_down):
+    task = _Task(nap=0.1)
+    monkeypatch.setattr(Eval, "get", classmethod(lambda cls, id, version=None: types.SimpleNamespace(
+        id="e", version=1, tasks=[types.SimpleNamespace(task_id="t", task_version=1)])))
 
-    assert result.exit_code == 2
-    assert "drop --max-concurrency" in result.output
+    result = _invoke(monkeypatch, task, "eval", "run", "--id", "e", "--k", "3", "--max-concurrency", "1")
+
+    assert result.exit_code == 0, result.output
+    assert (len(task.contexts), task.most_active) == (3, 1)
 
 
 class _Runner(Runner):
@@ -161,7 +187,7 @@ def test_an_error_following_the_runs_still_stops_the_runner(monkeypatch, local_s
     runner = _Runner(status_error=RuntimeError("run index unreachable"))
     local_stores.set_runner(runner)
 
-    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit")
+    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t")
 
     assert isinstance(result.exception, RuntimeError)
     assert runner.stopped
@@ -171,7 +197,7 @@ def test_a_first_ctrl_c_lets_the_runner_finish_stopping(monkeypatch, local_store
     runner = _Runner(stop_seconds=2.0)
     local_stores.set_runner(runner)
 
-    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit", signal_after=0.5)
+    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", signal_after=0.5)
 
     assert result.exit_code == 130, result.output
     assert runner.stopped
@@ -181,7 +207,7 @@ def test_an_error_cancelling_after_ctrl_c_still_stops_the_runner(monkeypatch, lo
     runner = _Runner(cancel_error=RuntimeError("runner unreachable"), run_status=RunStatus.RUNNING)
     local_stores.set_runner(runner)
 
-    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", "--submit", signal_after=0.5)
+    result = _invoke(monkeypatch, _Task(), "task", "run", "--id", "t", signal_after=0.5)
 
     assert isinstance(result.exception, RuntimeError)
     assert runner.stopped

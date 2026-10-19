@@ -1,5 +1,6 @@
 """``agent-env task run`` and ``task run-batch`` tear down what each run deployed, however it ends; ``--keep`` holds
-it up until Ctrl-C, and Ctrl-C mid-run tears it down and exits 130."""
+it up until Ctrl-C, and Ctrl-C mid-run tears it down and exits 130. ``task run`` goes through the configured runner,
+here ``LocalRunner``: it tears a run down, and the CLI tears down what ``--keep`` held, from the stored instance."""
 
 import asyncio
 import importlib
@@ -11,13 +12,15 @@ import threading
 import pytest
 from click.testing import CliRunner
 
-from agent_env.cli import cli
+from agent_env.cli import cli, submitted_runs
+from agent_env.runner import local_runner
 from agent_env.task import Task
+from agent_env.task.store import register_task_instance, seed_task_instance_context
 from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport
 from agent_env.task_step.context import DeployedSandbox
 
 task_run = importlib.import_module("agent_env.cli.task.run")  # the package's ``run`` is the click command
-pytestmark = pytest.mark.usefixtures("sigint_handled")
+pytestmark = pytest.mark.usefixtures("sigint_handled", "local_stores")
 
 
 class _Deploys:
@@ -28,10 +31,13 @@ class _Deploys:
     def __init__(self, nap=0.0, ending=None):
         self.nap, self.ending, self.contexts = nap, ending, []
 
-    async def run(self, context, **_):
+    async def run(self, context, instance_id=None, **_):
         self.contexts.append(context)
         context.deployed_sandboxes.append(DeployedSandbox(
             sandbox_name="box", sandbox_id=f"sb-{len(self.contexts)}", sandbox_mode="vm", sandbox_type="fake"))
+        if instance_id:
+            register_task_instance("t", 1, 1, instance_id=instance_id)
+            seed_task_instance_context(instance_id, context)
         await asyncio.sleep(self.nap)
         if self.ending:
             raise self.ending
@@ -49,7 +55,13 @@ def torn_down(monkeypatch):
             RecordedSandbox(s.sandbox_id, s.sandbox_type, "sandbox") for s in context.deployed_sandboxes))
 
     monkeypatch.setattr(task_run, "teardown_run", teardown_run)
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    monkeypatch.setattr(submitted_runs, "POLL_SECONDS", 0.02)
     return torn
+
+
+def _ids(contexts) -> list[str]:
+    return sorted(s.sandbox_id for context in contexts for s in context.deployed_sandboxes)
 
 
 def _invoke(monkeypatch, tmp_path, task, *args, signal_after=None):
@@ -73,18 +85,17 @@ def test_a_run_that_passes_is_torn_down(monkeypatch, tmp_path, torn_down):
     result = _invoke(monkeypatch, tmp_path, task, "run")
 
     assert result.exit_code == 0, result.output
-    assert torn_down == task.contexts
-    assert "Tore down 1 sandbox" in result.output
+    assert _ids(torn_down) == ["sb-1"]
 
 
-def test_a_run_that_fails_is_torn_down_and_reported_as_before(monkeypatch, tmp_path, torn_down):
+def test_a_run_that_fails_is_torn_down_and_fails_the_command(monkeypatch, tmp_path, torn_down):
     task = _Deploys(ending=RuntimeError("boom"))
 
     result = _invoke(monkeypatch, tmp_path, task, "run")
 
-    assert result.exit_code != 0
-    assert isinstance(result.exception, RuntimeError)
-    assert torn_down == task.contexts
+    assert result.exit_code == 1, result.output
+    assert "FAILED: RuntimeError: boom" in result.output
+    assert _ids(torn_down) == ["sb-1"]
 
 
 def test_each_parallel_run_is_torn_down(monkeypatch, tmp_path, torn_down):
@@ -93,7 +104,7 @@ def test_each_parallel_run_is_torn_down(monkeypatch, tmp_path, torn_down):
     result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2")
 
     assert result.exit_code == 0, result.output
-    assert len(torn_down) == 2 and {id(c) for c in torn_down} == {id(c) for c in task.contexts}
+    assert _ids(torn_down) == ["sb-1", "sb-2"]
 
 
 def test_keep_holds_a_run_up_until_ctrl_c_then_tears_it_down(monkeypatch, tmp_path, torn_down):
@@ -104,7 +115,7 @@ def test_keep_holds_a_run_up_until_ctrl_c_then_tears_it_down(monkeypatch, tmp_pa
     assert result.exit_code == 0, result.output
     assert "Kept up:" in result.output and "sb-1" in result.output
     assert "Holding 1 sandbox up; Ctrl-C tears it down." in result.output
-    assert torn_down == task.contexts
+    assert _ids(torn_down) == ["sb-1"]
 
 
 def test_keep_still_tears_down_a_run_ctrl_c_cancels(monkeypatch, tmp_path, torn_down):
@@ -113,7 +124,7 @@ def test_keep_still_tears_down_a_run_ctrl_c_cancels(monkeypatch, tmp_path, torn_
     result = _invoke(monkeypatch, tmp_path, task, "run", "--keep", signal_after=1.0)
 
     assert result.exit_code == 130, result.output
-    assert torn_down == task.contexts
+    assert _ids(torn_down) == ["sb-1"]
     assert "Holding" not in result.output
 
 
@@ -123,9 +134,9 @@ def test_ctrl_c_mid_run_tears_down_every_run_and_exits_130(monkeypatch, tmp_path
     result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2", signal_after=1.0)
 
     assert result.exit_code == 130, result.output
-    assert len(torn_down) == 2
-    assert "Cancelling and tearing down (Ctrl-C again to stop now)" in result.output
-    assert result.output.count("CANCELLED") == 2
+    assert _ids(torn_down) == ["sb-1", "sb-2"]
+    assert "Cancelling the runs (Ctrl-C again to stop waiting for them)" in result.output
+    assert result.output.count("Run CANCELED") == 2
 
 
 def test_each_seed_of_a_batch_is_torn_down(monkeypatch, tmp_path, torn_down):
@@ -153,7 +164,7 @@ def test_ctrl_c_with_keep_also_tears_down_a_run_that_already_finished(monkeypatc
     result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2", "--keep", signal_after=1.0)
 
     assert result.exit_code == 130, result.output
-    assert {id(c) for c in torn_down} == {id(c) for c in task.contexts}
+    assert _ids(torn_down) == ["sb-1", "sb-2"]
     assert "Holding" not in result.output
 
 
@@ -162,7 +173,7 @@ def test_keep_writes_the_context_of_a_run_that_failed(monkeypatch, tmp_path, tor
 
     result = _invoke(monkeypatch, tmp_path, task, "run", "--keep", signal_after=1.0)
 
-    assert isinstance(result.exception, RuntimeError)
+    assert result.exit_code == 1, result.output
     assert list(tmp_path.glob("t_*.json")), "no context file to resume the kept run from"
 
 
@@ -175,6 +186,6 @@ def test_a_kept_failed_run_reports_its_own_error_when_its_context_cant_be_writte
 
     result = _invoke(monkeypatch, tmp_path, task, "run", "--keep", signal_after=1.0)
 
-    assert isinstance(result.exception, RuntimeError) and str(result.exception) == "boom"
+    assert result.exit_code == 1 and "FAILED: RuntimeError: boom" in result.output
     assert "Couldn't write the run's context: [Errno 28] No space left on device" in result.output
-    assert torn_down == task.contexts  # the Ctrl-C that ended the hold
+    assert _ids(torn_down) == ["sb-1"]
