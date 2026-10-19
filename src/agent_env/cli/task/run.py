@@ -155,10 +155,13 @@ def _format_loaded_snapshot(load: dict) -> str:
 # parallelism (no yield between the append and the callback in the same
 # coroutine). Verifier output is duck-typed via `verifier_id`.
 def _step_output_lines(step, context) -> list[str]:
-    if step.type == "deploy_env" and context.deployed_envs:
-        return [_format_env(context.deployed_envs[-1])]
-    if step.type == "deploy_agent" and context.deployed_agents:
-        agent = context.deployed_agents[-1]
+    """What ``step`` produced in ``context``, which may already hold later steps' output too."""
+    agent_name = getattr(step, "agent_name", None)
+    if step.type == "deploy_env" and (env := next((e for e in reversed(context.deployed_envs)
+                                                   if (e.metadata or {}).get("deploy_step_id") == step.id), None)):
+        return [_format_env(env)]
+    if step.type == "deploy_agent" and (agent := next((a for a in reversed(context.deployed_agents)
+                                                       if a.agent_name == agent_name), None)):
         lines = [_format_agent(agent)]
         # If this deploy step also loaded a snapshot, surface its provenance.
         loaded = context.metadata.get("agent_loaded_snapshots") or []
@@ -169,10 +172,11 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if step.type == "prompt_agent" and context.prompt_responses:
-        return [_format_prompt_response(context.prompt_responses[-1])]
+    if step.type == "prompt_agent" and (response := next((r for r in reversed(context.prompt_responses)
+                                                           if r.step_id == step.id), None)):
+        return [_format_prompt_response(response)]
     if step.type == "snapshot_agent_state":
-        snapshots = context.metadata.get("agent_snapshots") or []
+        snapshots = [s for s in context.metadata.get("agent_snapshots") or [] if s.get("source_agent_name") == agent_name]
         if snapshots:
             return [_format_snapshot_capture(snapshots[-1])]
     if step.type == "modify_env_tool_access":
@@ -543,10 +547,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["gateway_env_id"] = gateway_env_id
     if service_db_env_id:
         initial_context.metadata.setdefault("user_overrides", {})["service_db_env_id"] = service_db_env_id
-    if start_step:
-        initial_context.metadata["start_step"] = start_step
-    if keep:
-        initial_context.metadata[KEEP_KEY] = True
+    initial_context.metadata["start_step"] = start_step
+    initial_context.metadata[KEEP_KEY] = keep
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")

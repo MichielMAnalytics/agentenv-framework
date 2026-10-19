@@ -12,6 +12,7 @@ from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.store.ids import fs_safe
 from agent_env.task.interrupts import Interrupts
+from agent_env.task.store import TaskStepStatus
 from agent_env.task_step.context import TaskStepContext
 
 
@@ -25,6 +26,23 @@ def _write_context(context, task_id, output_dir, prefix=""):
     click.echo(click.style(f"{prefix}Output written to: {output_path}", fg="blue"))
 
 
+def _echo_step(tasks):
+    """Echo each step a run finishes as the runner records it, with the score of a verifier step."""
+    steps = {task.id: {step.id: (i, step, len(task.steps)) for i, step in enumerate(task.steps)} for task in tasks}
+
+    def echo(run, result, instance):
+        i, step, total = steps[run.task_id][result.step_id]
+        passed = result.status == TaskStepStatus.SUCCESS
+        click.echo(click.style(f"{run.tag} {'Completed' if passed else 'Failed'} step [{i + 1}/{total}]: {step.type} "
+                               f"(id={step.id})", fg="green" if passed else "red"))
+        vid = getattr(step, "verifier_id", None)
+        verifications = ((instance.context or {}).get("metadata") or {}).get("verifications") or {}
+        if passed and vid and (score := (verifications.get(vid) or {}).get("score")) is not None:
+            click.echo(click.style(f"{run.tag} score (verifier_id={vid}): {score}", fg="green"))
+
+    return echo
+
+
 def _run_submitted(tasks, k: int, base_metadata: dict, output_dir: str | None, agent_model: str | None,
                    agent_artifact_id: str | None, max_concurrency: int | None) -> None:
     """The configured ``[runner]`` runs every task ``k`` times, at most ``max_concurrency`` at once, and tears the
@@ -35,7 +53,8 @@ def _run_submitted(tasks, k: int, base_metadata: dict, output_dir: str | None, a
     with Interrupts() as interrupts:
         [outcome] = interrupts.run(interrupts.gather(
             [submitted_runs.submit_and_follow(submissions, runs, agent_model=agent_model,
-                                              agent_artifact_id=agent_artifact_id, limit=max_concurrency)],
+                                              agent_artifact_id=agent_artifact_id, limit=max_concurrency,
+                                              on_step=_echo_step(tasks))],
             submitted_runs.on_signal))
     if not outcome.cancelled() and outcome.exception() is not None:
         raise outcome.exception()
