@@ -1,0 +1,121 @@
+"""What the CLI is run with: the configured endpoint as Anthropic's variables, the model's aliases pinned to the run's
+model, [model.headers] and the run's attribution on every call, the turn and thinking limits, and what a 404 from
+the endpoint means."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+
+from tst.unit.examples.claude_code.agent import claude_bridge
+from tst.unit.examples.claude_code.support import FakeCLI
+
+GATEWAY = {"LITELLM_API_KEY": "gateway-key", "LITELLM_BASE_URL": "https://gateway.example.com"}
+ALIASES = ("ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL", "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+           "ANTHROPIC_DEFAULT_FABLE_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL")
+
+
+def test_the_configured_endpoint_is_the_clis_with_its_key_as_a_bearer_token():
+    env = claude_bridge.cli_env({**GATEWAY, "ANTHROPIC_API_KEY": "stale"})
+
+    assert (env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_API_KEY"]) == (
+        "gateway-key", "https://gateway.example.com", "")
+    assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+
+
+def test_anthropic_variables_already_set_are_kept():
+    env = claude_bridge.cli_env({**GATEWAY, "ANTHROPIC_AUTH_TOKEN": "own", "ANTHROPIC_BASE_URL": "https://own.example"})
+
+    assert (env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"]) == ("own", "https://own.example")
+
+
+def test_no_endpoint_leaves_the_cli_to_its_own_and_an_api_key_alone():
+    env = claude_bridge.cli_env({"ANTHROPIC_API_KEY": "direct"}, model="claude-x")
+
+    assert env["ANTHROPIC_API_KEY"] == "direct" and "ANTHROPIC_AUTH_TOKEN" not in env
+    assert not any(alias in env for alias in ALIASES)
+
+
+def test_the_models_aliases_are_pinned_on_the_endpoint_but_an_explicit_one_wins():
+    env = claude_bridge.cli_env({**GATEWAY, "ANTHROPIC_DEFAULT_HAIKU_MODEL": "small"}, model="claude-x")
+
+    assert {alias: env[alias] for alias in ALIASES} == {
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-x", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-x",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "small", "ANTHROPIC_DEFAULT_FABLE_MODEL": "claude-x",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "claude-x",
+    }
+
+
+def test_model_headers_and_the_runs_attribution_reach_every_call():
+    env = claude_bridge.cli_env(
+        {**GATEWAY, "LITELLM_EXTRA_HEADERS": json.dumps({"X-Bill-To": "team-a", "x-litellm-tags": "from-config"})},
+        project_id="p-1", task_id="t-1")
+
+    assert env["ANTHROPIC_CUSTOM_HEADERS"].splitlines() == [
+        "X-Bill-To: team-a",
+        "x-litellm-tags: projectId:p-1,taskId:t-1",
+        "x-litellm-customer-id: p-1",
+    ]
+
+
+@pytest.mark.parametrize("raw", ["not json", '["a list"]'])
+def test_model_headers_that_arent_a_json_object_are_ignored(raw):
+    assert "ANTHROPIC_CUSTOM_HEADERS" not in claude_bridge.cli_env({**GATEWAY, "LITELLM_EXTRA_HEADERS": raw})
+
+
+def test_attribution_alone_is_sent_without_model_headers():
+    env = claude_bridge.cli_env(GATEWAY, task_id="t-1")
+
+    assert env["ANTHROPIC_CUSTOM_HEADERS"] == "x-litellm-tags: taskId:t-1"
+
+
+@pytest.fixture
+def spawned(monkeypatch):
+    seen: dict = {}
+
+    async def _exec(*cmd, **kwargs):
+        seen["cmd"], seen["env"] = list(cmd), kwargs["env"]
+        return FakeCLI(b'{"type": "result", "subtype": "success", "result": "ok", "session_id": "s"}\n')
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+    return seen
+
+
+def test_the_turn_and_thinking_limits_reach_the_cli(spawned, monkeypatch):
+    for name, value in GATEWAY.items():
+        monkeypatch.setenv(name, value)
+
+    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False, model="claude-x", max_turns=7,
+                                         max_thinking_tokens=4096))
+
+    assert spawned["cmd"][spawned["cmd"].index("--max-turns") + 1] == "7"
+    assert spawned["env"]["MAX_THINKING_TOKENS"] == "4096"
+    assert spawned["env"]["ANTHROPIC_AUTH_TOKEN"] == "gateway-key"
+
+
+def test_no_limits_add_no_flags(spawned):
+    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False))
+
+    assert "--max-turns" not in spawned["cmd"] and "MAX_THINKING_TOKENS" not in spawned["env"]
+
+
+def test_a_404_from_the_endpoint_says_it_may_not_serve_anthropics_messages_api(monkeypatch):
+    monkeypatch.setenv("LITELLM_BASE_URL", "https://router.example.com/v1")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
+    not_found = {"type": "result", "subtype": "success", "is_error": True, "session_id": "s",
+                 "terminal_reason": "api_error", "api_error_status": 404, "result": "API Error: 404 Not Found"}
+
+    async def _exec(*cmd, **kwargs):
+        return FakeCLI((json.dumps(not_found) + "\n").encode(), returncode=1)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False))
+
+    assert result.attempts == 1
+    assert result.error == (
+        "claude CLI exited with code 1: API Error: 404 Not Found; https://router.example.com/v1 answered 404: Claude "
+        "Code needs an endpoint serving Anthropic's Messages API (<base>/v1/messages), such as a LiteLLM gateway, "
+        "that knows the model")
