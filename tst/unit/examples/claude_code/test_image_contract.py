@@ -11,7 +11,8 @@ DOCKERFILE = (AGENT_DIR / "Dockerfile").read_text()
 
 
 def test_every_file_the_image_copies_is_in_the_folder():
-    copied = [name for line in re.findall(r"^COPY (.+) \S+$", DOCKERFILE, re.MULTILINE) for name in line.split()]
+    copied = [name for line in re.findall(r"^COPY (?!--from=)(.+) \S+$", DOCKERFILE, re.MULTILINE)
+              for name in line.split()]
 
     assert copied and all((AGENT_DIR / name).is_file() for name in copied), copied
     # install.sh and run.sh are install/v1's; a build context pruned to what the Dockerfile reads keeps them so.
@@ -23,6 +24,22 @@ def test_the_image_installs_the_protocol_alone_from_its_requirements():
                     if line and not line.startswith("#")]
 
     assert requirements == ["agentenv-framework-protocol[agent]"]
+
+
+def test_the_image_gives_the_model_node_alone_from_a_pinned_image():
+    assert re.search(r"^FROM public\.ecr\.aws/docker/library/node:\d+-slim@sha256:[0-9a-f]{64} AS node$", DOCKERFILE,
+                     re.MULTILINE)
+    copied = re.findall(r"^COPY --from=node (.+)$", DOCKERFILE, re.MULTILINE)
+    assert copied == ["/usr/local/bin/node /usr/local/bin/node"]
+
+
+def test_the_packages_the_image_gives_the_models_python_are_pinned():
+    packages = [line for line in (AGENT_DIR / "model-requirements.txt").read_text().splitlines()
+                if line and not line.startswith("#")]
+
+    assert packages and all(re.fullmatch(r"[A-Za-z0-9_.-]+==[0-9][0-9A-Za-z.]*", line) for line in packages), packages
+    assert any(line.startswith("boto3==") for line in packages)
+    assert "-r requirements.txt -r model-requirements.txt" in DOCKERFILE
 
 
 def test_the_image_pins_its_cli_checks_its_checksum_and_keeps_tls_on():

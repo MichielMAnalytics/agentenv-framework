@@ -10,7 +10,8 @@ does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bear
 on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
 endpoint. Building the image downloads Claude Code, which is Anthropic's software under its
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); the image is built where it runs and never
-published. The CLI's version is the Dockerfile's `CLAUDE_CODE_VERSION`.
+published. The CLI's version is the Dockerfile's `CLAUDE_CODE_VERSION`. The image gives the scripts the model runs
+`node`, without npm or npx, and the Python packages `model-requirements.txt` pins.
 
 `install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
 `install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements

@@ -1,3 +1,6 @@
+# Node for the scripts the model runs, without npm or npx; Claude Code itself is a native build.
+FROM public.ecr.aws/docker/library/node:22-slim@sha256:c3de60bf2f9dd0ac6370e6117950ff62d6e339527e7472301c9c78a017978392 AS node
+
 FROM public.ecr.aws/docker/library/python:3.11-slim@sha256:c20888b6acdd1e63e1c433a185bf3ad162c0288fe484616ce062e0d28add2900
 # poppler-utils: the CLI's Read tool runs pdftoppm for a PDF's pages.
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl poppler-utils \
@@ -15,9 +18,10 @@ RUN set -eu; \
     echo "$checksum  /usr/local/bin/claude" | sha256sum -c -; \
     chmod 0755 /usr/local/bin/claude; \
     rm /tmp/manifest.json
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /opt/agent
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt model-requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r model-requirements.txt
 # install.sh and run.sh are install/v1's: in the image, so they stay in its build context.
 COPY a2a_server.py claude_bridge.py kit.py entrypoint.sh install.sh run.sh ./
 # The CLI's cwd, /app, and its state, fixed so neither follows the uid: Modal runs the image as root.
