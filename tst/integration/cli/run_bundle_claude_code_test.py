@@ -83,8 +83,7 @@ def test_a_task_naming_no_agent_runs_the_shipped_claude_code_against_the_configu
     first = _run(_bundle(state / "one", "ask", _ask("Say pong.", "pong")))
 
     assert first.exit_code == 0, first.output
-    assert f"{IMAGE}: building with docker" in first.output, first.output
-    assert f"{AGENT}: v1 (new)" in first.output, first.output
+    assert f"{IMAGE}: v1 (new)" in first.output and f"{AGENT}: v1 (new)" in first.output, first.output
     assert "tasks/ask.json v1: passed" in first.output, first.output
     calls = endpoint.messages()
     assert calls, "the CLI never called the endpoint"
@@ -104,7 +103,7 @@ def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(
     endpoint.respond = tool_then_answer("__echo", {"text": "ping-from-tool"}, prefix="the tool said: ")
     root = _bundle(state / "tools", "echo", [
         {"id": "env", "type": "deploy_env", "env_id": ECHO_ENV, "sandbox_type": "local"},
-        *_ask("Call the echo tool with the text ping-from-tool.", "the tool said: ping-from-tool", env_ids=[ECHO_ENV]),
+        *_ask("Call the echo tool with the text ping-from-tool.", "ping-from-tool", env_ids=[ECHO_ENV]),
     ])
     root.joinpath("tasks/echo.json").write_text(json.dumps(
         [{**step, "depends_on": ["env"]} if step["id"] == "agent" else step
@@ -112,7 +111,9 @@ def test_the_shipped_claude_code_calls_the_tools_of_the_env_it_is_deployed_with(
 
     result = _run(root)
 
-    assert result.exit_code == 0, result.output
-    assert "tasks/echo.json v1: passed" in result.output, result.output
-    offered = {tool["name"] for call in endpoint.messages() for tool in call.body.get("tools") or []}
-    assert any(name.endswith("__echo") for name in offered), sorted(offered)
+    offered = sorted({tool["name"] for call in endpoint.messages() for tool in call.body.get("tools") or []})
+    seen = (result.output, offered, endpoint.tool_results())
+    assert result.exit_code == 0 and "tasks/echo.json v1: passed" in result.output, seen
+    # The fake never repeats the prompt, so the text reached the answer through the tool.
+    assert any(name.endswith("__echo") for name in offered), seen
+    assert ["ping-from-tool" in result for result in endpoint.tool_results()] == [True], seen

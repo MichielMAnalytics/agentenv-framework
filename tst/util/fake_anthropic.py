@@ -10,6 +10,7 @@ import socket
 import struct
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -66,17 +67,15 @@ def tool_then_answer(tool_suffix: str, arguments: dict, *, prefix: str = "") -> 
 
 
 def _tool_result_text(body: dict) -> str | None:
-    for message in reversed(body.get("messages") or []):
-        content = message.get("content")
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "tool_result":
-                inner = block.get("content")
-                if isinstance(inner, list):
-                    return " ".join(part.get("text", "") for part in inner if isinstance(part, dict))
-                return str(inner)
-        return None
+    """The text of a tool result in the latest user turn, or None. The CLI may follow it with system messages."""
+    user = next((m for m in reversed(body.get("messages") or []) if m.get("role") == "user"), None)
+    content = user.get("content") if user else None
+    for block in content if isinstance(content, list) else ():
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            inner = block.get("content")
+            if isinstance(inner, list):
+                return " ".join(part.get("text", "") for part in inner if isinstance(part, dict))
+            return str(inner)
     return None
 
 
@@ -84,7 +83,8 @@ def _tool_result_text(body: dict) -> str | None:
 class FakeAnthropic:
     host: str
     respond: Responder = field(default_factory=lambda: answer("pong"))
-    seen: list[Seen] = field(default_factory=list)
+    # The latest requests only: a CLI that loops resends its whole history each call.
+    seen: deque[Seen] = field(default_factory=lambda: deque(maxlen=200))
     faults: list[Fault] = field(default_factory=list)
     _server: ThreadingHTTPServer | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -112,6 +112,10 @@ class FakeAnthropic:
     def messages(self) -> list[Seen]:
         """The model calls, not the token counts."""
         return [seen for seen in self.seen if seen.path == "/v1/messages"]
+
+    def tool_results(self) -> list[str]:
+        """The text of each tool result the CLI sent back."""
+        return [text for seen in self.messages() if (text := _tool_result_text(seen.body)) is not None]
 
     def _next_fault(self) -> Fault | None:
         with self._lock:
