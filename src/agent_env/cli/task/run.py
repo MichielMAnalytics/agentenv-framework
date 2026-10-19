@@ -488,15 +488,8 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         raise click.UsageError("--submit hands the runs to the configured [runner]: --keep, --context-json, "
                                "--gateway-env-id and --service-db-env-id act on this process only")
 
-    from agent_env.config import get_config
     from agent_env.task import Task
 
-    if gateway_env_id:
-        get_config().default_gateway_env_id = gateway_env_id
-        click.echo(f"Override default_gateway_env_id: {gateway_env_id}")
-    if service_db_env_id:
-        get_config().default_service_db_env_id = service_db_env_id
-        click.echo(f"Override default_service_db_env_id: {service_db_env_id}")
     if output_dir is None:
         output_dir = f"/tmp/taskid={fs_safe(task_id)}-run{uuid4().hex[:6]}"
     if context_json:
@@ -528,6 +521,10 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         initial_context.metadata.setdefault("user_overrides", {})["env_state_type"] = env_state_type
     if env_state_instance_id:
         initial_context.metadata.setdefault("user_overrides", {})["env_state_instance_id"] = env_state_instance_id
+    if gateway_env_id:
+        initial_context.metadata.setdefault("user_overrides", {})["gateway_env_id"] = gateway_env_id
+    if service_db_env_id:
+        initial_context.metadata.setdefault("user_overrides", {})["service_db_env_id"] = service_db_env_id
     initial_context.metadata["task_id"] = task_id
 
     click.echo(f"Fetching task: id={task_id} version={task_version or 'latest'}...")
