@@ -521,6 +521,7 @@ class Gateway:
         if request.method in _SAFE_METHODS:
             return await forward(request, base_url, role=role, timeout=self.REST_PROXY_TIMEOUT, mcp_server=mcp_server)
         changelog_before = self._query_changelog_id()
+        attribution = self._attribution(role)  # at the start: a fire may be gone by the time the response ends
 
         async def log_write(status: int) -> None:
             changelog_after = self._query_changelog_id()
@@ -533,7 +534,7 @@ class Gateway:
                 "method": request.method,
                 "path": "/" + request.path_params.get("path", ""),
                 "status": status,
-                **self._attribution(role),
+                **attribution,
                 "changelog_id_before": changelog_before,
                 "changelog_id_after": changelog_after,
             })
@@ -984,7 +985,11 @@ class Gateway:
         try:
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
-                result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                try:
+                    result = await self._call_child_tool(server_url, tool_name, arguments, caller=Caller(role=role))
+                except Exception as e:
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e, source="step_api")
+                    raise
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
@@ -1109,7 +1114,11 @@ class Gateway:
 
             async with self._tool_call_guard():
                 changelog_before = self._query_changelog_id()
-                result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                try:
+                    result = await self._call_child_tool(server_url, tool_name, kwargs, caller=caller)
+                except Exception as e:
+                    await self._log_failed_call(tool_call_event_id, changelog_before, e)
+                    raise
                 changelog_id = self._query_changelog_id()
 
             await self._log_event({
@@ -1172,6 +1181,16 @@ class Gateway:
             })
         except Exception:
             logger.exception("Failed to log tool_call_result for a gateway tool")
+
+    async def _log_failed_call(self, tool_call_event_id: str, changelog_before: int | None, error: Exception,
+                               **source: str) -> None:
+        """Close a failed call's write window, which may hold a write it committed first (fail-open)."""
+        try:
+            await self._log_event({"event_type": "tool_call_failed", **source, "tool_call_event_id": tool_call_event_id,
+                                   "error": f"{type(error).__name__}: {str(error)[:300]}",
+                                   "changelog_id_before": changelog_before, "changelog_id": self._query_changelog_id()})
+        except Exception:
+            logger.exception("Failed to log a failed tool call")
 
     def _attribution(self, role: str) -> dict:
         """Who made a tool call, for its trajectory event: the caller's role, and the trigger fires it was made for

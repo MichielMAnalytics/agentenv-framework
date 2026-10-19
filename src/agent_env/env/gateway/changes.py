@@ -19,10 +19,11 @@ class ChangeAttribution:
             self._calls[event["event_id"]] = {"kind": "tool_call", "event_id": event["event_id"],
                                               "tool": (event.get("tool_call") or {}).get("function_name"),
                                               **_who(event)}
-        elif kind == "tool_call_result":
+        elif kind in ("tool_call_result", "tool_call_failed"):
             actor = self._calls.pop(event.get("tool_call_event_id"), None)
-            if actor is not None:
-                self._add(event.get("changelog_id_before"), event.get("changelog_id"), actor)
+            if actor is not None and "changelog_id_before" in event:  # a gateway-native tool's result has no window
+                failed = {"failed": True} if kind == "tool_call_failed" else {}
+                self._add(event["changelog_id_before"], event.get("changelog_id"), {**actor, **failed})
         elif kind == "internal_tool_call":
             self._add(event.get("changelog_id_before"), event.get("changelog_id_after"), {
                 "kind": "trigger_action", "event_id": event["event_id"], "trigger_id": event.get("trigger_id"),

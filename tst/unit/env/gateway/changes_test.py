@@ -127,22 +127,25 @@ class _Changelog:
 
 
 class _WritingSession:
-    """The child server: each call writes one changelog row."""
+    """The child server: each call writes one changelog row, then raises `failure` when one is set."""
 
-    def __init__(self, changelog: _Changelog):
+    def __init__(self, changelog: _Changelog, failure: Exception | None = None):
         self.changelog = changelog
+        self.failure = failure
 
     async def list_tools(self):
         return SimpleNamespace(tools=[TOOL])
 
     async def call_tool(self, name, arguments, *args, meta=None, **kwargs):
         self.changelog.write("messages", f"m{len(self.changelog.rows) + 1}")
+        if self.failure is not None:
+            raise self.failure
         return CallToolResult(content=[TextContent(type="text", text="ok")], isError=False)
 
 
-def _gateway(changelog: _Changelog, **kw) -> Gateway:
+def _gateway(changelog: _Changelog, failure: Exception | None = None, **kw) -> Gateway:
     gw = Gateway(host="127.0.0.1", port=0, server_name="t", internal_mcp_servers=[InternalMCPServer("mail", URL)], **kw)
-    session = _WritingSession(changelog)
+    session = _WritingSession(changelog, failure)
 
     async def _open(stack):
         return {URL: session}
@@ -217,6 +220,73 @@ async def test_tool_calls_record_the_changelog_ids_they_spanned_and_changes_name
     ]
     assert changes["changes"][0]["timestamp"] == "2026-10-14T08:00:00+00:00"
     assert changes["changes"][0]["changed_fields"] == {"id": "m1"}
+
+
+def test_a_result_that_measured_no_window_claims_no_row():
+    changes = ChangeAttribution()
+    changes.observe(_call("event_1", "list_website_urls", "default"))
+    changes.observe({"event_type": "tool_call_result", "event_id": "event_2", "tool_call_event_id": "event_1",
+                     "changelog_id": 5})
+    assert changes.actors([1, 5]) == [[], []]
+
+
+@pytest.mark.asyncio
+async def test_a_gateway_tool_called_through_step_after_a_write_claims_none_of_it():
+    changelog = _Changelog()
+    gw = _gateway(changelog, website_urls={"mail": "http://mail-frontend"})
+    try:
+        assert (await gw._step_call_tool({"tool_name": TOOL.name, "arguments": {}}, "default")).status_code == 200
+        assert (await gw._step_call_tool({"tool_name": "list_website_urls", "arguments": {}},
+                                         "carol@example.com")).status_code == 200
+    finally:
+        await gw._close_child_sessions()
+
+    _, body = await _http(gw, "GET", "/changes")
+    assert [[(a["tool"], a["role"]) for a in c["actors"]] for c in json.loads(body)["changes"]] == [
+        [(TOOL.name, "default")]]
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_writes_then_fails_still_names_its_write_and_keeps_its_error():
+    changelog = _Changelog()
+    gw = _gateway(changelog, failure=RuntimeError("lost the connection after committing"))
+    try:
+        resp = await gw._step_call_tool({"tool_name": TOOL.name, "arguments": {}}, "default")
+        ctx = contextvars.copy_context()
+        ctx.run(Caller(role="carol@example.com").bind)
+        with pytest.raises(Exception, match="lost the connection after committing"):
+            await ctx.run(asyncio.create_task, gw._mcp._tool_manager.call_tool(TOOL.name, {}))
+    finally:
+        await gw._close_child_sessions()
+
+    assert resp.status_code == 500
+    assert json.loads(resp.body)["error"] == "Tool execution failed (RuntimeError): lost the connection after committing"
+    _, body = await _http(gw, "GET", "/changes")
+    assert [[(a["role"], a.get("failed")) for a in c["actors"]] for c in json.loads(body)["changes"]] == [
+        [("default", True)], [("carol@example.com", True)]]
+
+
+@pytest.mark.asyncio
+async def test_a_request_keeps_the_trigger_fire_it_started_under(monkeypatch):
+    changelog = _Changelog()
+    cause = {"trigger_id": "reply", "action_index": 0, "fire": 1}
+    gw = _gateway(changelog, rest_proxy_urls={"mail": "http://mail-backend"})
+    gw._trigger_engine._in_flight["bob@example.com"] = [cause]
+
+    async def body():
+        yield b"a"
+        gw._trigger_engine._in_flight.pop("bob@example.com")
+        changelog.write("drafts", "d1")
+        yield b"b"
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body()))
+    monkeypatch.setattr(rest_proxy_module.httpx, "AsyncClient", lambda **kw: _RealAsyncClient(transport=transport, **kw))
+    before = len(_trajectory())
+
+    await _http(gw, "POST", "/svc/mail/api/drafts", headers={"AgentEnv-Role": "bob@example.com"})
+
+    [logged] = [e for e in _trajectory()[before:] if e["event_type"] == "http_request"]
+    assert logged["caused_by"] == [cause]
 
 
 @pytest.mark.asyncio
