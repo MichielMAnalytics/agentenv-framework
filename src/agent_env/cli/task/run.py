@@ -19,7 +19,7 @@ from agent_env.providers.sandbox_providers.local_sandbox import LocalSandbox
 from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.store import TaskStepStatus, register_task_instance, seed_task_instance_context
+from agent_env.task.store import register_task_instance, seed_task_instance_context
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
@@ -155,13 +155,10 @@ def _format_loaded_snapshot(load: dict) -> str:
 # parallelism (no yield between the append and the callback in the same
 # coroutine). Verifier output is duck-typed via `verifier_id`.
 def _step_output_lines(step, context) -> list[str]:
-    """What ``step`` produced in ``context``, which may already hold later steps' output too."""
-    agent_name = getattr(step, "agent_name", None)
-    if step.type == "deploy_env" and (env := next((e for e in reversed(context.deployed_envs)
-                                                   if (e.metadata or {}).get("deploy_step_id") == step.id), None)):
-        return [_format_env(env)]
-    if step.type == "deploy_agent" and (agent := next((a for a in reversed(context.deployed_agents)
-                                                       if a.agent_name == agent_name), None)):
+    if step.type == "deploy_env" and context.deployed_envs:
+        return [_format_env(context.deployed_envs[-1])]
+    if step.type == "deploy_agent" and context.deployed_agents:
+        agent = context.deployed_agents[-1]
         lines = [_format_agent(agent)]
         # If this deploy step also loaded a snapshot, surface its provenance.
         loaded = context.metadata.get("agent_loaded_snapshots") or []
@@ -172,11 +169,10 @@ def _step_output_lines(step, context) -> list[str]:
         if match:
             lines.append(_format_loaded_snapshot(match))
         return lines
-    if step.type == "prompt_agent" and (response := next((r for r in reversed(context.prompt_responses)
-                                                           if r.step_id == step.id), None)):
-        return [_format_prompt_response(response)]
+    if step.type == "prompt_agent" and context.prompt_responses:
+        return [_format_prompt_response(context.prompt_responses[-1])]
     if step.type == "snapshot_agent_state":
-        snapshots = [s for s in context.metadata.get("agent_snapshots") or [] if s.get("source_agent_name") == agent_name]
+        snapshots = context.metadata.get("agent_snapshots") or []
         if snapshots:
             return [_format_snapshot_capture(snapshots[-1])]
     if step.type == "modify_env_tool_access":
@@ -388,86 +384,13 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
     _tear_down_kept(kept)
 
 
-def _echo_step(task):
-    """Echo each step a run finishes as the runner records it: one run's output in full, several runs' scores."""
-    steps = {step.id: (i, step) for i, step in enumerate(task.steps)}
-
-    def echo(run, result, instance):
-        i, step = steps[result.step_id]
-        passed = result.status == TaskStepStatus.SUCCESS
-        prefix = f"{run.tag} " if run.tag else ""
-        click.echo(click.style(f"{prefix}{'Completed' if passed else 'Failed'} step [{i + 1}/{len(task.steps)}]: "
-                               f"{step.type} (id={step.id})", fg="green" if passed else "red"))
-        if not passed or not instance.context:
-            return
-        context = TaskStepContext.from_dict(instance.context)
-        vid = getattr(step, "verifier_id", None)
-        if not run.tag:
-            for line in _step_output_lines(step, context):
-                click.echo(click.style(line, fg="green"))
-        elif vid and (score := context.metadata.get("verifications", {}).get(vid, {}).get("score")) is not None:
-            click.echo(click.style(f"{prefix}score (verifier_id={vid}): {score}", fg="green"))
-
-    return echo
-
-
 def _stored(task, context: TaskStepContext) -> str:
     """A new instance holding ``context``, for the runner to continue a run from."""
     instance_id = uuid4().hex
-    register_task_instance(task.id, task.version, len(task.steps), int(context.metadata.get("start_step") or 0),
+    register_task_instance(task.id, task.version, len(task.steps), context.metadata["start_step"],
                            instance_id=instance_id)
     seed_task_instance_context(instance_id, context)
     return instance_id
-
-
-def _run_submitted(task, context: TaskStepContext, *, k: int, output_dir: str, resume: bool, keep: bool,
-                   agent_model: str | None, agent_artifact_id: str | None) -> None:
-    """The configured ``[runner]`` runs the ``k`` runs; this follows them, writes each run's context and, with
-    ``keep``, holds what they left up until Ctrl-C."""
-    tags = [f"[run {i}]" for i in range(1, k + 1)] if k > 1 else [""]
-    submissions = [(tag, task, copy.deepcopy(context.metadata), _stored(task, context) if resume else None)
-                   for tag in tags]
-    runs: list[submitted_runs.SubmittedRun] = []
-    with Interrupts() as interrupts:
-        [outcome] = interrupts.run(interrupts.gather(
-            [submitted_runs.submit_and_follow(submissions, runs, agent_model=agent_model,
-                                              agent_artifact_id=agent_artifact_id, on_step=_echo_step(task))],
-            submitted_runs.on_signal))
-        if not outcome.cancelled() and outcome.exception() is not None:
-            raise outcome.exception()
-        interrupted = interrupts.signum if interrupts.count else None
-        click.echo()
-        ended = []
-        for run in runs:
-            instance = run.instance()
-            if instance is None or instance.context is None:
-                continue
-            context = TaskStepContext.from_dict(instance.context)
-            if run.done and run.record.status is not RunStatus.CANCELED:
-                ended.append((run.tag, context))
-            prefix = f"{run.tag} " if run.tag else ""
-            try:
-                _write_context(context, task.id, output_dir, prefix=prefix)
-            except OSError as e:
-                click.echo(click.style(f"{prefix}Couldn't write the run's context: {e}", fg="red"))
-        completed = sum(run.completed for run in runs)
-        if interrupted is not None:
-            click.echo(click.style("Task cancelled." if k == 1 else f"{completed}/{k} runs completed.", fg="red"))
-        elif completed == k:
-            click.echo(click.style("Task completed!" if k == 1 else f"All {k} runs completed!", fg="blue"))
-        else:
-            for run in runs:
-                if not run.completed:
-                    click.echo(click.style(f"{f'{run.tag} ' if run.tag else ''}{run.record.status}: {run.record.error}",
-                                           fg="red"))
-            if k > 1:
-                click.echo(click.style(f"{completed}/{k} runs completed, {k - completed}/{k} failed.", fg="red"))
-        if keep:
-            _settle_kept(ended, interrupts, interrupted)
-    if interrupted is not None:
-        raise SystemExit(128 + interrupted)
-    if completed < k:
-        raise SystemExit(1)
 
 
 @click.command()
@@ -557,8 +480,39 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
 
     print_banner()
 
-    _run_submitted(task, initial_context, k=k, output_dir=output_dir, resume=bool(context_json), keep=keep,
-                   agent_model=agent_model, agent_artifact_id=agent_artifact_id)
+    tags = [f"[run {i}]" for i in range(1, k + 1)] if k > 1 else [""]
+    submissions = [(tag, task, copy.deepcopy(initial_context.metadata),
+                    _stored(task, initial_context) if context_json else None) for tag in tags]
+    with Interrupts() as interrupts:
+        runs = submitted_runs.follow(interrupts, submissions, agent_model=agent_model,
+                                     agent_artifact_id=agent_artifact_id, step_lines=_step_output_lines if k == 1 else None)
+        interrupted = interrupts.signum if interrupts.count else None
+        click.echo()
+        ended = []
+        for run in runs:
+            if run.instance is None or run.instance.context is None:
+                continue
+            context = TaskStepContext.from_dict(run.instance.context)
+            if run.done and run.record.status is not RunStatus.CANCELED:
+                ended.append((run.tag, context))
+            prefix = f"{run.tag} " if run.tag else ""
+            try:
+                _write_context(context, task.id, output_dir, prefix=prefix)
+            except OSError as e:
+                click.echo(click.style(f"{prefix}Couldn't write the run's context: {e}", fg="red"))
+        completed = sum(run.completed for run in runs)
+        if interrupted is not None:
+            click.echo(click.style("Task cancelled." if k == 1 else f"{completed}/{k} runs completed.", fg="red"))
+        elif completed == k:
+            click.echo(click.style("Task completed!" if k == 1 else f"All {k} runs completed!", fg="blue"))
+        elif k > 1:
+            click.echo(click.style(f"{completed}/{k} runs completed, {k - completed}/{k} failed.", fg="red"))
+        if keep:
+            _settle_kept(ended, interrupts, interrupted)
+    if interrupted is not None:
+        raise SystemExit(128 + interrupted)
+    if completed < k:
+        raise SystemExit(1)
 
 
 def _seed_universe_id(task, seed: dict) -> str | None:

@@ -14,6 +14,8 @@ from click.testing import CliRunner
 
 from agent_env.cli import cli, submitted_runs
 from agent_env.runner import local_runner
+from agent_env.runner import store as run_store
+from agent_env.runner.runner import RunStatus
 from agent_env.task import Task
 from agent_env.task.store import register_task_instance, seed_task_instance_context
 from agent_env.task.teardown import TORN_DOWN_KEY, RecordedSandbox, TeardownReport
@@ -86,6 +88,8 @@ def test_a_run_that_passes_is_torn_down(monkeypatch, tmp_path, torn_down):
 
     assert result.exit_code == 0, result.output
     assert _ids(torn_down) == ["sb-1"]
+    [record] = run_store.list_runs(task_id="t")
+    assert record.status is RunStatus.COMPLETED and task.contexts[0].metadata["workflow_id"] == record.run_id
 
 
 def test_a_run_that_fails_is_torn_down_and_fails_the_command(monkeypatch, tmp_path, torn_down):
@@ -137,6 +141,7 @@ def test_ctrl_c_mid_run_tears_down_every_run_and_exits_130(monkeypatch, tmp_path
     assert _ids(torn_down) == ["sb-1", "sb-2"]
     assert "Cancelling the runs (Ctrl-C again to stop waiting for them)" in result.output
     assert result.output.count("Run CANCELED") == 2
+    assert {r.status for r in run_store.list_runs(task_id="t")} == {RunStatus.CANCELED}
 
 
 def test_each_seed_of_a_batch_is_torn_down(monkeypatch, tmp_path, torn_down):

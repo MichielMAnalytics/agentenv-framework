@@ -75,20 +75,6 @@ def _invoke(monkeypatch, task, *args, signal_after=None):
         logging.disable(logging.NOTSET)
 
 
-def test_a_submitted_run_goes_through_the_runner_and_lands_in_the_run_index(monkeypatch, tmp_path, torn_down):
-    task = _Task()
-
-    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--output-dir", str(tmp_path))
-
-    assert result.exit_code == 0, result.output
-    assert "Submitted run local-" in result.output and "Run COMPLETED" in result.output
-    assert "Task completed!" in result.output
-    [record] = run_store.list_runs(task_id="t")
-    assert record.status is RunStatus.COMPLETED
-    assert task.contexts[0].metadata["workflow_id"] == record.run_id
-    assert torn_down == task.contexts
-
-
 def test_a_failed_submitted_run_fails_the_command(monkeypatch, tmp_path, torn_down):
     task = _Task(failed_steps=[{"step_id": "s1"}])
 
@@ -98,18 +84,6 @@ def test_a_failed_submitted_run_fails_the_command(monkeypatch, tmp_path, torn_do
     assert result.exit_code == 1, result.output
     assert "0/2 runs completed, 2/2 failed." in result.output
     assert {r.status for r in run_store.list_runs(task_id="t")} == {RunStatus.FAILED}
-
-
-def test_ctrl_c_cancels_the_submitted_runs_through_the_runner_and_exits_130(monkeypatch, tmp_path, torn_down):
-    task = _Task(nap=30)
-
-    result = _invoke(monkeypatch, task, "task", "run", "--id", "t", "--k", "2",
-                     "--output-dir", str(tmp_path), signal_after=1.0)
-
-    assert result.exit_code == 130, result.output
-    assert "Cancelling the runs (Ctrl-C again to stop waiting for them)" in result.output
-    assert {r.status for r in run_store.list_runs(task_id="t")} == {RunStatus.CANCELED}
-    assert len(torn_down) == 2
 
 
 def test_a_context_json_is_stored_as_an_instance_the_runner_continues(monkeypatch, tmp_path, torn_down):

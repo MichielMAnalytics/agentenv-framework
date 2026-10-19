@@ -12,7 +12,6 @@ from agent_env.cli.banner import print_banner
 from agent_env.cli.identity import get_agent_env_client_id
 from agent_env.store.ids import fs_safe
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.store import TaskStepStatus
 from agent_env.task_step.context import TaskStepContext
 
 
@@ -24,68 +23,6 @@ def _write_context(context, task_id, output_dir, prefix=""):
     with open(output_path, "w") as f:
         json.dump(context.to_safe_dict(), f, indent=2)
     click.echo(click.style(f"{prefix}Output written to: {output_path}", fg="blue"))
-
-
-def _echo_step(tasks):
-    """Echo each step a run finishes as the runner records it, with the score of a verifier step."""
-    steps = {(task.id, task.version): {step.id: (i, step, len(task.steps)) for i, step in enumerate(task.steps)}
-             for task in tasks}
-
-    def echo(run, result, instance):
-        i, step, total = steps[(run.task_id, instance.task_version)][result.step_id]
-        passed = result.status == TaskStepStatus.SUCCESS
-        click.echo(click.style(f"{run.tag} {'Completed' if passed else 'Failed'} step [{i + 1}/{total}]: {step.type} "
-                               f"(id={step.id})", fg="green" if passed else "red"))
-        vid = getattr(step, "verifier_id", None)
-        verifications = ((instance.context or {}).get("metadata") or {}).get("verifications") or {}
-        if passed and vid and (score := (verifications.get(vid) or {}).get("score")) is not None:
-            click.echo(click.style(f"{run.tag} score (verifier_id={vid}): {score}", fg="green"))
-
-    return echo
-
-
-def _run_submitted(tasks, k: int, base_metadata: dict, output_dir: str | None, agent_model: str | None,
-                   agent_artifact_id: str | None, max_concurrency: int | None) -> None:
-    """The configured ``[runner]`` runs every task ``k`` times, at most ``max_concurrency`` at once, and tears the
-    runs down; this follows them and reports each run's score from its task instance."""
-    submissions = [(f"[{task.id} run {i}]" if k > 1 else f"[{task.id}]", task, copy.deepcopy(base_metadata), None)
-                   for task in tasks for i in range(1, k + 1)]
-    runs: list[submitted_runs.SubmittedRun] = []
-    with Interrupts() as interrupts:
-        [outcome] = interrupts.run(interrupts.gather(
-            [submitted_runs.submit_and_follow(submissions, runs, agent_model=agent_model,
-                                              agent_artifact_id=agent_artifact_id, limit=max_concurrency,
-                                              on_step=_echo_step(tasks))],
-            submitted_runs.on_signal))
-    if not outcome.cancelled() and outcome.exception() is not None:
-        raise outcome.exception()
-    click.echo()
-    results = []
-    for run in runs:
-        instance = run.instance()
-        context = TaskStepContext.from_dict(instance.context) if instance and instance.context else None
-        if output_dir and context is not None:
-            _write_context(context, run.task_id, output_dir, prefix=f"{run.tag} ")
-        results.append((run, context.metadata.get("score") if context else None))
-    passed = [(run, score) for run, score in results if run.completed]
-    if passed:
-        click.echo(click.style("Results:", fg="blue"))
-        for run, score in passed:
-            click.echo(click.style(f"  {run.tag} PASSED{f' score={score}' if score is not None else ''}", fg="green"))
-    for run, _ in results:
-        if not run.completed:
-            outcome_text = (f"{run.record.status}" + (f": {run.record.error}" if run.record.error else "")
-                            if run.done else "CANCELLED")
-            click.echo(click.style(f"  {run.tag} {outcome_text}", fg="red"))
-    total = len(submissions)
-    if len(passed) == total:
-        click.echo(click.style(f"\nAll {total} runs completed!", fg="blue"))
-    else:
-        click.echo(click.style(f"\n{len(passed)}/{total} runs completed, {total - len(passed)}/{total} failed.", fg="red"))
-    if interrupts.count:
-        raise SystemExit(128 + interrupts.signum)
-    if len(passed) < total:
-        raise SystemExit(1)
 
 
 @click.command()
@@ -121,10 +58,6 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     print_banner()
 
-    client_id = get_agent_env_client_id()
-    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else {}
-    if overrides := {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model)) if value}:
-        base_metadata["user_overrides"] = overrides
     total_runs = len(tasks) * k
     concurrency_note = f" (max concurrency: {max_concurrency})" if max_concurrency else ""
     click.echo(click.style(
@@ -132,4 +65,48 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
         fg="blue",
     ))
     click.echo()
-    _run_submitted(tasks, k, base_metadata, output_dir, agent_model, agent_artifact_id, max_concurrency)
+
+    client_id = get_agent_env_client_id()
+    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else {}
+    if overrides := {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model)) if value}:
+        base_metadata["user_overrides"] = overrides
+
+    submissions = [(f"[{task.id} run {i}]" if k > 1 else f"[{task.id}]", task, copy.deepcopy(base_metadata), None)
+                   for task in tasks for i in range(1, k + 1)]
+    with Interrupts() as interrupts:
+        runs = submitted_runs.follow(interrupts, submissions, agent_model=agent_model,
+                                     agent_artifact_id=agent_artifact_id, limit=max_concurrency)
+
+    click.echo()
+
+    # Summarize results
+    failures = []
+    successes = []
+    for run in runs:
+        context = run.instance.context if run.instance else None
+        if output_dir and context is not None:
+            _write_context(TaskStepContext.from_dict(context), run.task.id, output_dir, prefix=f"{run.tag} ")
+        if run.completed:
+            successes.append((run.tag, (context or {}).get("metadata", {}).get("score")))
+        else:
+            failures.append((run.tag, run.outcome if run.done else "CANCELLED"))
+
+    if successes:
+        click.echo(click.style("Results:", fg="blue"))
+        for tag, score in successes:
+            score_str = f" score={score}" if score is not None else ""
+            click.echo(click.style(f"  {tag} PASSED{score_str}", fg="green"))
+
+    if len(successes) < total_runs:
+        for tag, outcome in failures:
+            click.echo(click.style(f"  {tag} {outcome}", fg="red"))
+        click.echo(click.style(
+            f"\n{len(successes)}/{total_runs} runs completed, {total_runs - len(successes)}/{total_runs} failed.",
+            fg="red",
+        ))
+    else:
+        click.echo(click.style(f"\nAll {total_runs} runs completed!", fg="blue"))
+    if interrupts.count:
+        raise SystemExit(128 + interrupts.signum)
+    if len(successes) < total_runs:
+        raise SystemExit(1)

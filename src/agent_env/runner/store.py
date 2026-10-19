@@ -26,15 +26,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+_indexed = None
+
+
 def _docs():
-    return get_config().get_document_store()
+    """The configured document store, with the indexes backing the two reads (status-by-run-id and the per-task
+    listing) made once per store: a caller that never ``start()``s a runner still gets them."""
+    global _indexed
+    docs = get_config().get_document_store()
+    if _indexed is not docs:
+        docs.ensure_index(RUNS_COLLECTION, ["run_id"], unique=True)
+        docs.ensure_index(RUNS_COLLECTION, ["task_id", "created_at_utc"])
+        _indexed = docs
+    return docs
 
 
 def ensure_indexes() -> None:
-    """Indexes backing the two reads: status-by-run-id and the per-task listing."""
-    docs = _docs()
-    docs.ensure_index(RUNS_COLLECTION, ["run_id"], unique=True)
-    docs.ensure_index(RUNS_COLLECTION, ["task_id", "created_at_utc"])
+    """Make the run index's indexes now rather than on first use."""
+    _docs()
 
 
 def insert_run(record: RunRecord) -> RunRecord:
