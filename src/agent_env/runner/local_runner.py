@@ -2,9 +2,9 @@
 semaphore. ``submit()`` fires the run in the background and returns immediately; there is no
 persisted queue or lease, so the run's asyncio task lives only in this process.
 
-Consequence: a run does not survive a hub restart. ``start()`` fails any run a previous
-process left non-terminal (it can't still be executing), and ``stop()`` cancels the ones in
-flight. A durable, lease-based runner that resurrects a run across a restart — and supports
+Consequence: a run does not survive its process. Each run records the process that owns it; ``start()`` fails a
+run left non-terminal by a process that has exited (it can't still be executing), and ``stop()`` cancels the ones
+in flight. A durable, lease-based runner that resurrects a run across a restart — and supports
 multiple worker processes — is a follow-up; configure an external durable ``[runner]`` where that matters.
 """
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
+import socket
 import uuid
 from typing import Optional
 
@@ -50,11 +52,14 @@ class LocalRunner(Runner):
     # --- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Reconcile orphans from a previous process: a run left QUEUED/RUNNING has no live
-        task here, so fail it rather than leave it hanging. There is no queue to resume."""
+        """Reconcile orphans: a run left QUEUED/RUNNING by a process that has exited has no live task anywhere, so
+        fail it rather than leave it hanging. One a live process owns, such as a CLI following its runs, is left to
+        it. There is no queue to resume."""
         run_store.ensure_indexes()
         orphaned = 0
         for record in run_store.active_runs(self.type):
+            if _owner_alive(record.owner):
+                continue
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error="interrupted by a hub restart")
             orphaned += 1
         if orphaned:
@@ -118,7 +123,7 @@ class LocalRunner(Runner):
         instance_id = instance_id or new_instance_id(task_id)        # minted here so callers can link immediately
         record = RunRecord(
             run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
-            instance_id=instance_id, status=RunStatus.QUEUED,
+            instance_id=instance_id, status=RunStatus.QUEUED, owner={"host": socket.gethostname(), "pid": os.getpid()},
             overrides={
                 "agent_model": agent_model,
                 "agent_artifact_id": agent_artifact_id,
@@ -268,3 +273,19 @@ class LocalRunner(Runner):
         context.metadata["instance_id"] = record.instance_id
         context.metadata["runner"] = self.type
         return context
+
+
+def _owner_alive(owner: Optional[dict]) -> bool:
+    """Whether the process that submitted a run may still be running it. One on another host can't be checked from
+    here, so that host's own start reconciles it; a run naming no owner predates owners."""
+    if not owner:
+        return False
+    if owner["host"] != socket.gethostname():
+        return True
+    try:
+        os.kill(owner["pid"], 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True

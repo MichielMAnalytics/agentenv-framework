@@ -5,6 +5,9 @@ bookkeeping, bounded concurrency, real cancellation, and orphan reconciliation o
 """
 
 import asyncio
+import socket
+import subprocess
+import sys
 
 import pytest
 
@@ -264,6 +267,33 @@ async def test_start_fails_a_run_left_running_by_a_previous_process(docs):
     rec = run_store.get_run("orphan")
     assert rec.status is RunStatus.FAILED
     assert "restart" in rec.error
+
+
+@pytest.mark.asyncio
+async def test_start_spares_the_runs_a_live_runner_owns_and_fails_a_dead_processes(docs, monkeypatch):
+    started = asyncio.Event()
+
+    async def on_run(_):
+        started.set()
+        await asyncio.sleep(30)
+
+    _install_task(monkeypatch, _FakeTask(on_run=on_run))
+    gone = subprocess.Popen([sys.executable, "-c", "pass"])
+    gone.wait()
+    orphan = RunRecord(run_id="orphan", runner="local", task_id="t", task_version=1, instance_id="i",
+                       status=RunStatus.RUNNING)
+    docs.insert(run_store.RUNS_COLLECTION, {**orphan.to_dict(), "owner": {"host": socket.gethostname(), "pid": gone.pid}})
+    owner = LocalRunner(workers=1)
+    handle = await owner.submit("t1", 1)
+    await asyncio.wait_for(started.wait(), 5)
+    explorer = LocalRunner(workers=1)
+    try:
+        await explorer.start()
+        assert (await explorer.status(handle.run_id)).status is RunStatus.RUNNING
+        assert run_store.get_run("orphan").status is RunStatus.FAILED
+    finally:
+        await explorer.stop()
+        await owner.stop()
 
 
 @pytest.mark.asyncio

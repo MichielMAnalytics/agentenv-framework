@@ -56,7 +56,7 @@ def follow(interrupts: Interrupts, submissions, *, step_lines=None, **submit_kwa
 
 async def _submit_and_follow(submissions, runs, step_lines, *, limit=None, **submit_kwargs) -> None:
     """``stop()`` is always awaited, spared from a first Ctrl-C so a ``LocalRunner`` finishes tearing its runs down,
-    short of a second. Never ``start()``: ``LocalRunner``'s fails every local run another process has in flight."""
+    short of a second. Never ``start()``: that is the serving process's."""
     runner = get_runner()
     submit = functools.partial(runner.submit, **submit_kwargs)
     pending = list(submissions)
