@@ -367,12 +367,14 @@ async def test_a_run_given_an_instance_continues_it_from_its_stored_context(docs
     from agent_env.task.store import register_task_instance, seed_task_instance_context
     from agent_env.task_step.context import TaskStepContext
 
-    register_task_instance("t1", 1, 2, 1, instance_id="inst-1")
+    from agent_env.task import Task
+
+    register_task_instance("t1", 3, 2, 1, instance_id="inst-1")
     seed_task_instance_context("inst-1", TaskStepContext(metadata={"done": "s0"}))
-    task = _FakeTask()
-    _install_task(monkeypatch, task)
+    task, versions = _FakeTask(), []
+    monkeypatch.setattr(Task, "get", classmethod(lambda cls, tid, ver=None: versions.append(ver) or task))
     runner = LocalRunner(workers=1)
-    handle = await runner.submit("t1", 1, metadata={"start_step": 1}, instance_id="inst-1")
+    handle = await runner.submit("t1", metadata={"start_step": 1}, instance_id="inst-1")
     try:
         await _drain(runner, handle.run_id)
     finally:
@@ -380,7 +382,7 @@ async def test_a_run_given_an_instance_continues_it_from_its_stored_context(docs
 
     [call] = task.calls
     assert handle.instance_id == call["instance_id"] == "inst-1"
-    assert (call["start_step"], call["context"].metadata["done"]) == (1, "s0")
+    assert (call["start_step"], call["context"].metadata["done"], versions) == (1, "s0", [3])
 
 
 @pytest.mark.asyncio
