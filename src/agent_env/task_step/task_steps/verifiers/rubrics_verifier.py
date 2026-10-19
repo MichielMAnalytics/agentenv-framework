@@ -221,8 +221,7 @@ def render_run_context(run: RunContext, parts: list[str]) -> str:
                 lines.append(f"({len(events) - RUN_CONTEXT_EVENTS_MAX} earlier events not shown)")
             lines += [f"- {json.dumps({k: v for k, v in e.items() if k != 'seq'}, default=str)}"
                       for e in events[-RUN_CONTEXT_EVENTS_MAX:]]
-        lines += [f"(not available: {what}: {why})" for what, why in run.unavailable.items()
-                  if what.startswith("env_trigger_events.")]
+        lines += [f"(not available: {what}: {why})" for what, why in run.unavailable.items() if what != "conversation"]
         if len(lines) == 2:
             lines.append("(no trigger firings were recorded)")
         sections.append("\n".join(lines))

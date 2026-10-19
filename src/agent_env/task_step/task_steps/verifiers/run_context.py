@@ -5,7 +5,7 @@ import asyncio
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from agent_env.a2a_agent import conversation_store
 from agent_env.config import get_config
@@ -15,6 +15,8 @@ from agent_env.task_step.context import PromptResponse, TaskStepContext
 @dataclass(frozen=True)
 class RunContext:
     """The prompt's messages and firing logs, oldest first; ``unavailable`` names what could not be read, and why."""
+
+    ERROR_MAX_CHARS: ClassVar[int] = 200  # of a read error's message, in an ``unavailable`` reason
 
     conversation: list[dict] = field(default_factory=list)
     env_trigger_events: dict[str, list[dict]] = field(default_factory=dict)
@@ -26,17 +28,24 @@ class RunContext:
         return max((m["turn"] for m in self.conversation), default=0)
 
     def as_of_turn(self, turn: int) -> RunContext:
-        """The run as it stood after ``turn``: its messages, and the events from before the next turn's message."""
-        if turn >= self.turns:
+        """The run after ``turn``: its messages, and the events before the next turn's message (none if it's unknown)."""
+        if self.conversation and turn >= self.turns:
             return self
-        cutoff = next(m["ts"] for m in self.conversation if m["turn"] == turn + 1)
+        conversation = [m for m in self.conversation if m["turn"] <= turn]
+        cutoff = next((m["ts"] for m in self.conversation if m["turn"] == turn + 1), None)
+        if cutoff is None:
+            why = f"withheld: when turn {turn + 1} began is unknown, so later events can't be told apart"
+            withheld = [f"env_trigger_events.{env_id}" for env_id in self.env_trigger_events]
+            withheld += ["agent_trigger_events"] if self.agent_trigger_events else []
+            return replace(self, conversation=conversation, env_trigger_events={}, agent_trigger_events=[],
+                           unavailable={**self.unavailable, **dict.fromkeys(withheld, why)})
 
         def before(events: list[dict]) -> list[dict]:
             return [e for e in events if _before(e.get("ts"), cutoff)]
 
         return replace(
             self,
-            conversation=[m for m in self.conversation if m["turn"] <= turn],
+            conversation=conversation,
             env_trigger_events={env_id: before(events) for env_id, events in self.env_trigger_events.items()},
             agent_trigger_events=before(self.agent_trigger_events),
         )
@@ -53,10 +62,29 @@ async def load_run_context(context: TaskStepContext, prompt_response: Optional[P
     agent_events: list[dict] = []
     if prompt_response is not None:
         conversation = await asyncio.to_thread(_conversation, context, prompt_response, unavailable)
-        agent_events = list((context.metadata.get("agent_trigger_state") or {}).get(prompt_response.step_id) or [])
+        agent_events = _agent_trigger_events(context, prompt_response.step_id, conversation, unavailable)
     env_events = await asyncio.to_thread(_env_trigger_events, context, unavailable)
     return RunContext(conversation=conversation, env_trigger_events=env_events, agent_trigger_events=agent_events,
                       unavailable=unavailable)
+
+
+def _error(e: Exception) -> str:
+    return f"{type(e).__name__}: {str(e)[:RunContext.ERROR_MAX_CHARS]}"
+
+
+def _agent_trigger_events(context: TaskStepContext, step_id: Optional[str], conversation: list[dict],
+                          unavailable: dict[str, str]) -> list[dict]:
+    """The user agent's firing log; unavailable, not empty, when it had triggers but ``prompt_agent`` read none back."""
+    logs = context.metadata.get("agent_trigger_state") or {}
+    if step_id in logs:
+        return list(logs[step_id] or [])
+    armed = {r.get("agent_name") for r in context.metadata.get("agent_trigger_registrations") or []}
+    user_agent = next((m.get("author") for m in conversation if m["role"] == "user"), None)
+    # Without the conversation the user agent is unknown, so any agent's registered triggers may be its.
+    had_triggers = bool(armed) if "conversation" in unavailable else user_agent in armed
+    if had_triggers or step_id in (context.metadata.get("agent_trigger_firings") or {}):
+        unavailable["agent_trigger_events"] = "agent triggers were registered, but the user agent's log wasn't read"
+    return []
 
 
 def _conversation(context: TaskStepContext, prompt_response: PromptResponse, unavailable: dict[str, str]) -> list[dict]:
@@ -68,7 +96,7 @@ def _conversation(context: TaskStepContext, prompt_response: PromptResponse, una
     try:
         doc = conversation_store.get_conversation(conversation_id)
     except Exception as e:
-        unavailable["conversation"] = f"{type(e).__name__}: {str(e)[:200]}"
+        unavailable["conversation"] = _error(e)
         return []
     if doc is None:
         unavailable["conversation"] = f"conversation {conversation_id!r} is not in the store"
@@ -110,7 +138,7 @@ def _env_trigger_events(context: TaskStepContext, unavailable: dict[str, str]) -
         try:
             envelope = json.loads(get_config().get_object_store().get(entry["object_url"]))
         except Exception as e:
-            unavailable[f"env_trigger_events.{env_id}"] = f"{type(e).__name__}: {str(e)[:200]}"
+            unavailable[f"env_trigger_events.{env_id}"] = _error(e)
             continue
         events[env_id] = list((envelope.get("state") or {}).get("events") or [])
     return events

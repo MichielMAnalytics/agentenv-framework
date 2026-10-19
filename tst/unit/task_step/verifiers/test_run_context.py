@@ -65,6 +65,7 @@ def recorded_run(turns=TURNS) -> tuple[TaskStepContext, PromptResponse, dict]:
         "agent_trigger_firings": {"prompt": [{"turn": 1, "fired": ["reschedule"]}, {"turn": 2, "fired": []}]},
         "usersim_turn_outputs": {"prompt": [{"turn": 2, "fields": {"mood": "satisfied"}}]},
         "env_trigger_state": {"calendar": {"object_url": object_url, "capture_step_id": "prompt"}},
+        "agent_trigger_registrations": [{"step_id": "arm", "agent_name": "dana_sim", "added": ["reschedule"]}],
         "agent_trigger_state": {"prompt": agent_events},
     })
     prompt_response = PromptResponse(prompt_id="p1", response="Glad to help.", prompt_text=TURNS[0][0], step_id="prompt")
@@ -132,6 +133,47 @@ async def test_what_the_run_meant_to_record_but_cannot_be_read_is_named_not_left
     assert run.unavailable["conversation"] == "conversation 'conv-gone' is not in the store"
     assert run.unavailable["env_trigger_events.calendar"] == "TimeoutError: capture budget of 90s exceeded"
     assert "env_trigger_events.mail" in run.unavailable
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dropped", ["agent_trigger_firings", "agent_trigger_registrations"])
+async def test_a_user_agent_firing_log_that_was_not_read_back_is_named_not_left_empty(dropped):
+    context, prompt_response, _ = recorded_run()
+    for key in ("agent_trigger_state", dropped):
+        del context.metadata[key]
+
+    run = await load_run_context(context, prompt_response)
+
+    assert run.agent_trigger_events == [] and "agent_trigger_events" in run.unavailable
+    text = render_run_context(run, ["trigger_log"])
+    assert f"(not available: agent_trigger_events: {run.unavailable['agent_trigger_events']})" in text
+    assert "(no trigger firings were recorded)" not in text
+
+
+@pytest.mark.asyncio
+async def test_a_user_agent_with_no_triggers_of_its_own_has_no_firing_log_to_miss():
+    context, prompt_response, _ = recorded_run()
+    for key in ("agent_trigger_state", "agent_trigger_firings"):
+        del context.metadata[key]
+    context.metadata["agent_trigger_registrations"] = [{"step_id": "arm", "agent_name": "other_sim", "added": ["x"]}]
+
+    run = await load_run_context(context, prompt_response)
+
+    assert run.agent_trigger_events == [] and run.unavailable == {}
+
+
+@pytest.mark.asyncio
+async def test_without_the_conversation_a_turn_cut_withholds_the_firing_logs_it_cannot_cut():
+    context, prompt_response, recorded = recorded_run()
+    context.metadata["a2a_conversations"]["prompt"] = "conv-gone"
+    run = await load_run_context(context, prompt_response)
+
+    first = run.as_of_turn(1)
+
+    assert run.env_trigger_events == {"calendar": recorded["env"]} and run.agent_trigger_events == recorded["agent"]
+    assert first.conversation == [] and first.env_trigger_events == {} and first.agent_trigger_events == []
+    assert first.unavailable["conversation"] == run.unavailable["conversation"]
+    assert first.unavailable["env_trigger_events.calendar"] == first.unavailable["agent_trigger_events"]
 
 
 @pytest.mark.asyncio
@@ -207,6 +249,21 @@ async def test_graded_as_of_a_turn_the_judge_sees_neither_later_turns_nor_later_
     prompt = captured["eval_prompt"]
     assert TURNS[1][1] in prompt and "### Turn 3" not in prompt and TURNS[2][0] not in prompt
     assert '"trigger_id": "confirm"' in prompt and '"trigger_id": "late"' not in prompt
+
+
+@pytest.mark.asyncio
+async def test_graded_as_of_a_turn_without_the_conversation_the_judge_sees_no_firings(monkeypatch):
+    v = _verifier(run_context_for_judge=["trigger_log"], grade_up_to_turn=1)
+    captured = _judge_prompt(monkeypatch, v)
+    context, _ = _judged_run()
+    context.metadata["a2a_conversations"]["prompt"] = "conv-gone"
+
+    await v.execute(context)
+
+    prompt = captured["eval_prompt"]
+    assert '"trigger_id"' not in prompt
+    assert "(not available: env_trigger_events.calendar: withheld" in prompt
+    assert "(not available: agent_trigger_events: withheld" in prompt
 
 
 @pytest.mark.asyncio
