@@ -17,7 +17,7 @@ import uuid
 from typing import Optional
 
 from agent_env.runner import store as run_store
-from agent_env.runner.runner import RunHandle, RunRecord, Runner, RunStatus
+from agent_env.runner.runner import KEEP_KEY, RunHandle, RunRecord, Runner, RunStatus
 from agent_env.task.teardown import TERMINATE_TIMEOUT_SECONDS, teardown_run
 
 logger = logging.getLogger(__name__)
@@ -76,7 +76,8 @@ class LocalRunner(Runner):
                 await asyncio.wait(stuck, timeout=self.ABANDON_WAIT_SECONDS)
                 # A run still going never reached its own teardown: remove what it has recorded so far.
                 left = [run_id for run_id, task in self._inflight.items()
-                        if not task.done() and run_id not in self._tearing_down and run_id in self._contexts]
+                        if not task.done() and run_id not in self._tearing_down and run_id in self._contexts
+                        and not self._contexts[run_id].metadata.get(KEEP_KEY)]
                 if left:
                     logger.warning("Shutting down without %d run(s) that didn't stop; tearing down what they recorded",
                                    len(left))
@@ -111,9 +112,10 @@ class LocalRunner(Runner):
         agent_model: Optional[str] = None,
         agent_artifact_id: Optional[str] = None,
         metadata: Optional[dict] = None,
+        instance_id: Optional[str] = None,
     ) -> RunHandle:
         run_id = f"local-{uuid.uuid4().hex}"
-        instance_id = uuid.uuid4().hex        # minted here so callers can link immediately
+        instance_id = instance_id or uuid.uuid4().hex        # minted here so callers can link immediately
         record = RunRecord(
             run_id=run_id, runner=self.type, task_id=task_id, task_version=task_version,
             instance_id=instance_id, status=RunStatus.QUEUED,
@@ -202,7 +204,7 @@ class LocalRunner(Runner):
             run_store.mark_terminal(record.run_id, RunStatus.FAILED, error=f"{type(e).__name__}: {e}")
         finally:
             try:
-                if context is not None and record.run_id not in self._abandoned:
+                if context is not None and record.run_id not in self._abandoned and not context.metadata.get(KEEP_KEY):
                     self._tearing_down.add(record.run_id)
                     try:
                         async with asyncio.timeout(self.TEARDOWN_WAIT_SECONDS):
@@ -249,9 +251,11 @@ class LocalRunner(Runner):
         ``workflow_id`` holds the run id — the hub, instance documents and UI all key off it —
         so nothing downstream needs a special case for the local runner.
         """
+        from agent_env.task.store import find_task_instance
         from agent_env.task_step import TaskStepContext
 
-        context = TaskStepContext()
+        stored = find_task_instance(record.instance_id)
+        context = TaskStepContext.from_dict(stored.context) if stored and stored.context else TaskStepContext()
         context.metadata.update(record.overrides.get("metadata") or {})
         context.metadata["workflow_id"] = record.run_id
         context.metadata["instance_id"] = record.instance_id

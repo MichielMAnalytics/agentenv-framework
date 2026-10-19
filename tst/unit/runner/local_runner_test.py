@@ -11,7 +11,7 @@ import pytest
 from agent_env.config import configure, reset_config, set_document_store
 from agent_env.runner import store as run_store
 from agent_env.runner.local_runner import LocalRunner
-from agent_env.runner.runner import RunRecord, RunStatus
+from agent_env.runner.runner import KEEP_KEY, RunRecord, RunStatus
 from agent_env.store.document_store.sqlite_document_store import LocalSqliteDocumentStore
 
 
@@ -326,6 +326,49 @@ async def test_what_a_run_deployed_is_torn_down_however_it_ends(docs, monkeypatc
         await runner.stop()
 
     assert torn_down == [handle.run_id]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_run_is_left_up(docs, monkeypatch):
+    from agent_env.runner import local_runner
+
+    torn_down = []
+
+    async def teardown_run(context):
+        torn_down.append(context)
+
+    monkeypatch.setattr(local_runner, "teardown_run", teardown_run)
+    _install_task(monkeypatch, _FakeTask())
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 1, metadata={KEEP_KEY: True})
+    try:
+        await _drain(runner, handle.run_id)
+        await _settled(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert torn_down == []
+
+
+@pytest.mark.asyncio
+async def test_a_run_given_an_instance_continues_it_from_its_stored_context(docs, monkeypatch):
+    from agent_env.task.store import register_task_instance, seed_task_instance_context
+    from agent_env.task_step.context import TaskStepContext
+
+    register_task_instance("t1", 1, 2, 1, instance_id="inst-1")
+    seed_task_instance_context("inst-1", TaskStepContext(metadata={"done": "s0"}))
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 1, metadata={"start_step": 1}, instance_id="inst-1")
+    try:
+        await _drain(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    [call] = task.calls
+    assert handle.instance_id == call["instance_id"] == "inst-1"
+    assert (call["start_step"], call["context"].metadata["done"]) == (1, "s0")
 
 
 @pytest.mark.asyncio
