@@ -22,6 +22,7 @@ def test_the_configured_endpoint_is_the_clis_with_its_key_as_a_bearer_token():
 
     assert (env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_API_KEY"]) == (
         "gateway-key", "https://gateway.example.com", "")
+    assert "LITELLM_API_KEY" not in env and "LITELLM_EXTRA_HEADERS" not in env
     assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
 
 
