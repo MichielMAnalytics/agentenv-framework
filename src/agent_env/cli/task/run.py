@@ -491,7 +491,7 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
                                      agent_artifact_id=agent_artifact_id, step_lines=_step_output_lines if k == 1 else None)
         interrupted = interrupts.signum if interrupts.count else None
         click.echo()
-        ended = []
+        ended, unexported = [], False
         for run in runs:
             if run.instance is None or run.instance.context is None:
                 continue
@@ -502,11 +502,12 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
             try:
                 _write_context(context, task.id, output_dir, prefix=prefix)
             except OSError as e:
+                unexported = True
                 click.echo(click.style(f"{prefix}Couldn't write the run's context: {e}", fg="red"))
         completed = sum(run.completed for run in runs)
         if interrupted is not None:
             click.echo(click.style("Task cancelled." if k == 1 else f"{completed}/{k} runs completed.", fg="red"))
-        elif completed == k:
+        elif completed == k and not unexported:
             click.echo(click.style("Task completed!" if k == 1 else f"All {k} runs completed!", fg="blue"))
         elif k > 1:
             click.echo(click.style(f"{completed}/{k} runs completed, {k - completed}/{k} failed.", fg="red"))
@@ -514,7 +515,7 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
             _settle_kept(ended, interrupts, interrupted)
     if interrupted is not None:
         raise SystemExit(128 + interrupted)
-    if completed < k:
+    if completed < k or unexported:
         raise SystemExit(1)
 
 

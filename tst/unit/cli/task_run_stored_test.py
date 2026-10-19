@@ -105,3 +105,15 @@ def test_a_seeded_step_reports_under_the_id_it_ran_as(tmp_path, k):
     assert result.exit_code == 0, result.output
     assert "Completed step [1/1]: writes_stored_run_test (id=verify-3)" in result.output
     assert ("grade-3" if k == "1" else "score (verifier_id=grade-3): 1.0") in result.output
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["passed", "failed"])
+def test_a_context_that_cant_be_exported_fails_the_command(tmp_path, fail):
+    _put("exported", _Writes(id="only", version=None, fail=fail))
+    (tmp_path / "taken").write_text("")
+
+    result = _invoke("--id", "exported", "--output-dir", str(tmp_path / "taken" / "out"))
+
+    assert result.exit_code == 1, result.output
+    assert "Couldn't write the run's context" in result.output and "Task completed!" not in result.output
+    assert ("Run FAILED: RuntimeError: boom" in result.output) == fail
