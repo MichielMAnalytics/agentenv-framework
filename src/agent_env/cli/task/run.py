@@ -20,9 +20,10 @@ from agent_env.runner.runner import KEEP_KEY, RunStatus
 from agent_env.store.ids import derive_id, fs_safe, is_local_id, validate_local_id
 from agent_env.store.routing import run_scope
 from agent_env.task.interrupts import Interrupts
-from agent_env.task.store import new_instance_id, register_task_instance, seed_task_instance_context
+from agent_env.task.store import get_task_instance_store, new_instance_id
 from agent_env.task.teardown import TeardownReport, kind, teardown_run
 from agent_env.task_step.context import TaskStepContext, read_dual_keyed
+from agent_env.task_step.context_ops import build_context_update_ops
 from agent_env.task_step.task_steps.collect_artifacts import CollectArtifactsTaskStep
 
 
@@ -387,12 +388,12 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
 
 def _stored(task, context: TaskStepContext) -> str:
     """A new instance holding ``context``, for the runner to continue a run from, recorded where the task's run records
-    go."""
+    go. A write that fails raises: the run would otherwise continue from an empty context."""
     instance_id = new_instance_id(task.id)
+    store = get_task_instance_store()
     with run_scope(task.id):
-        register_task_instance(task.id, task.version, len(task.steps), context.metadata["start_step"],
-                               instance_id=instance_id)
-        seed_task_instance_context(instance_id, context)
+        store.upsert_instance(instance_id, task.id, task.version, len(task.steps), context.metadata["start_step"])
+        store.seed_context(instance_id, build_context_update_ops(None, context))
     return instance_id
 
 

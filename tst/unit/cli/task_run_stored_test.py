@@ -11,10 +11,11 @@ from click.testing import CliRunner
 from agent_env.cli import cli, submitted_runs
 from agent_env.config import get_config
 from agent_env.config.runtime import Config
+from agent_env.runner import store as run_store
 from agent_env.runner.store import RUNS_COLLECTION
 from agent_env.store.document_store import Filter
 from agent_env.task import Task
-from agent_env.task.store import TASK_INSTANCES_COLLECTION, TASK_STEP_JOURNAL_COLLECTION
+from agent_env.task.store import TASK_INSTANCES_COLLECTION, TASK_STEP_JOURNAL_COLLECTION, TaskInstanceStore
 from agent_env.task_step.context import TaskStepContext
 from agent_env.task_step.task_step import TaskStep
 
@@ -117,3 +118,16 @@ def test_a_context_that_cant_be_exported_fails_the_command(tmp_path, fail):
     assert result.exit_code == 1, result.output
     assert "Couldn't write the run's context" in result.output and "Task completed!" not in result.output
     assert ("Run FAILED: RuntimeError: boom" in result.output) == fail
+
+
+def test_a_context_json_that_cant_be_stored_fails_before_anything_is_submitted(tmp_path, monkeypatch):
+    def unwritable(*args, **kwargs):
+        raise ConnectionError("store unreachable")
+
+    _put("resumed", _Writes(id="only", version=None))
+    monkeypatch.setattr(TaskInstanceStore, "seed_context", unwritable)
+
+    result = _invoke("--id", "resumed", "--context-json", _context_file(tmp_path, a=1), "--output-dir", str(tmp_path))
+
+    assert isinstance(result.exception, ConnectionError), result.output
+    assert run_store.list_runs(task_id="resumed") == []
