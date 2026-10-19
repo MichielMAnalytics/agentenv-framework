@@ -1,5 +1,4 @@
-"""The run a verifier grades, read from what the run recorded: the stored conversation with every user-side turn,
-the env firing logs prompt_agent captured, and the user agent's own firing log; cut as of a turn like the trajectory."""
+"""The run a verifier grades: the stored conversation, the firing logs, and the cut as of a turn."""
 from __future__ import annotations
 
 import json
@@ -39,8 +38,7 @@ def _between(earlier: str, later: str) -> str:
 
 
 def recorded_run(turns=TURNS) -> tuple[TaskStepContext, PromptResponse, dict]:
-    """A three-turn run as prompt_agent records it: the conversation in the store, which agent trigger wrote turn 2,
-    the user-sim's extra fields on turn 3, the env firing log in the object store and the user agent's firing log."""
+    """A three-turn run as prompt_agent records it: conversation, trigger and user-sim marks, and both firing logs."""
     conversation_id = f"conv-{uuid.uuid4().hex[:8]}"
     conversation_store.create_conversation(conversation_id, task_instance_id="run-1", source_agent_name="dana_sim",
                                            target_agent_name="solver")
@@ -103,7 +101,7 @@ async def test_as_of_a_turn_the_run_stops_before_the_next_turn_begins():
 
     assert [m["turn"] for m in first.conversation] == [1, 1]
     assert first.env_trigger_events == {"calendar": recorded["env"][:2]}
-    assert first.agent_trigger_events == recorded["agent"]  # fired just before turn 2's message: it wrote it
+    assert first.agent_trigger_events == recorded["agent"]
     assert [m["turn"] for m in second.conversation] == [1, 1, 2, 2]
     assert second.env_trigger_events == {"calendar": recorded["env"][:2]}
     assert run.as_of_turn(3) is run and run.as_of_turn(7) is run
@@ -111,7 +109,6 @@ async def test_as_of_a_turn_the_run_stops_before_the_next_turn_begins():
 
 @pytest.mark.asyncio
 async def test_a_prompt_with_no_stored_conversation_is_one_turn_of_its_prompt_and_reply():
-    """An episode's turn records a prompt and its reply, no conversation."""
     prompt_response = PromptResponse(prompt_id="p1", response="done", prompt_text="do it", step_id="turn")
 
     run = await load_run_context(TaskStepContext(prompt_responses=[prompt_response]), prompt_response)
@@ -270,7 +267,7 @@ def _outcome(script: bytes, monkeypatch, **kw) -> EnvOutcomeVerifierTaskStep:
 
 
 @pytest.mark.asyncio
-async def test_a_two_argument_verify_is_handed_the_run_it_grades(monkeypatch):
+async def test_a_verify_asking_for_run_is_handed_the_run_it_grades(monkeypatch):
     context, _, _ = recorded_run()
     context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
 
@@ -289,6 +286,17 @@ async def test_without_a_prompt_id_the_runs_last_prompt_is_graded(monkeypatch):
     await _outcome(RUN_SCRIPT, monkeypatch).execute(context)
 
     assert context.metadata["verifications"]["v"]["results"][0]["turns"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_verify_with_an_unrelated_second_parameter_is_called_as_before(monkeypatch):
+    context, _, _ = recorded_run()
+    context.deployed_envs.append(SimpleNamespace(env_id="calendar", mcp_url="http://mcp"))
+    script = b"async def verify(mcp_url, retries=3):\n    return [{'id': 'c', 'score': 1.0, 'retries': retries}]\n"
+
+    await _outcome(script, monkeypatch, prompt_id="p1").execute(context)
+
+    assert context.metadata["verifications"]["v"]["results"] == [{"id": "c", "score": 1.0, "retries": 3}]
 
 
 @pytest.mark.asyncio

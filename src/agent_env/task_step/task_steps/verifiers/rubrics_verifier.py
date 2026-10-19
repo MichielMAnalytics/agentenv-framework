@@ -189,8 +189,7 @@ def _cut(text: str, limit: int) -> str:
 
 
 def render_run_context(run: RunContext, parts: list[str]) -> str:
-    """The judge-prompt sections for ``parts`` of ``run``: the conversation turn by turn, and each firing log as one
-    compact JSON line per event, the most recent ``RUN_CONTEXT_EVENTS_MAX`` of each."""
+    """The judge-prompt sections for ``parts`` of ``run``: the conversation by turn, each firing log one event a line."""
     sections: list[str] = []
     if "conversation" in parts:
         lines = ["## Conversation", "The run's messages, turn by turn: the user side (the task's prompt, then each "
@@ -402,8 +401,7 @@ class RubricsVerifierTaskStep(TaskStep):
         fail_task_on_error: bool = True,
     ):
         super().__init__(id, version, depends_on=depends_on, fail_task_on_error=fail_task_on_error)
-        # What of the run beyond its trajectory the judge also sees (RUN_CONTEXT_PARTS): the conversation with every
-        # user-side turn, and the trigger firing logs; cut at grade_up_to_turn like the trajectory.
+        # RUN_CONTEXT_PARTS the judge also sees, cut at grade_up_to_turn like the trajectory.
         self.run_context_for_judge = _validated_run_context_parts(run_context_for_judge)
         # Grade a multi-turn run as it stood after this (1-based) turn: the judge sees turns 1..k only,
         # so a per-turn env snapshot can be scored on what the agent had done by then. None grades all.
@@ -1359,8 +1357,7 @@ class RubricsVerifierTaskStep(TaskStep):
         run_context: Optional[RunContext] = None,
     ) -> str:
         """``context_facts`` are rendered ``(label, value)`` pairs (``resolve_context_facts``); ``image_blocks``
-        are the blocks attached to the judge message, labels included when ``per_criterion_frames``; ``run_context``
-        is shown as ``run_context_for_judge`` asks."""
+        are the blocks attached to the judge message, labels included when ``per_criterion_frames``."""
         spec = self._spec()
         # Only the rubric_evidence templates have this placeholder; the others ignore the argument.
         checks_instruction = evidence_checks_instruction(has_policy=bool(self.grading_policy_prompt))

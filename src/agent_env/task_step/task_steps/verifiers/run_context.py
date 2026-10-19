@@ -1,11 +1,4 @@
-"""The run a verifier grades, beyond the env's state: the conversation, every user-side turn included, and the
-trigger firing logs.
-
-``load_run_context`` reads it from what the run recorded: the conversation ``prompt_agent`` stored for the prompt
-(``metadata["a2a_conversations"]``), the env firing logs it captured at the prompt's end
-(``metadata["env_trigger_state"]``), and the user agent's own firing log (``metadata["agent_trigger_state"]``).
-``RunContext.as_of_turn`` cuts it the way ``grade_up_to_turn`` cuts the trajectory.
-"""
+"""What a verifier knows of the run it grades beyond the env: the conversation and the trigger firing logs."""
 from __future__ import annotations
 
 import asyncio
@@ -21,11 +14,7 @@ from agent_env.task_step.context import PromptResponse, TaskStepContext
 
 @dataclass(frozen=True)
 class RunContext:
-    """``conversation``: the prompt's messages, oldest first, each ``{"turn", "role", "text", "parts", "ts"}`` with
-    ``author`` (who sent it, when recorded), and on a user message the agent triggers that wrote it (``fired``) and
-    the extra fields the user-sim returned with it (``fields``). ``env_trigger_events``: each env's gateway firing
-    log, oldest first. ``agent_trigger_events``: the user agent's firing log. ``unavailable`` names what the run
-    meant to record but could not be read, and why, so a verifier can tell a missing log from an empty one."""
+    """The prompt's messages and firing logs, oldest first; ``unavailable`` names what could not be read, and why."""
 
     conversation: list[dict] = field(default_factory=list)
     env_trigger_events: dict[str, list[dict]] = field(default_factory=dict)
@@ -37,8 +26,7 @@ class RunContext:
         return max((m["turn"] for m in self.conversation), default=0)
 
     def as_of_turn(self, turn: int) -> RunContext:
-        """The run as it stood after ``turn``: its messages up to that turn's reply, and the firing-log events from
-        before the next turn's user message (all of them when no turn follows)."""
+        """The run as it stood after ``turn``: its messages, and the events from before the next turn's message."""
         if turn >= self.turns:
             return self
         cutoff = next(m["ts"] for m in self.conversation if m["turn"] == turn + 1)
@@ -59,8 +47,7 @@ class RunContext:
 
 
 async def load_run_context(context: TaskStepContext, prompt_response: Optional[PromptResponse]) -> RunContext:
-    """The run context of ``prompt_response``'s prompt (the env firing logs alone without one). Never raises for a
-    record it cannot read; that lands in ``unavailable``."""
+    """The run context of ``prompt_response``'s prompt (env firing logs alone without one); never raises for a record."""
     unavailable: dict[str, str] = {}
     conversation: list[dict] = []
     agent_events: list[dict] = []
@@ -73,8 +60,7 @@ async def load_run_context(context: TaskStepContext, prompt_response: Optional[P
 
 
 def _conversation(context: TaskStepContext, prompt_response: PromptResponse, unavailable: dict[str, str]) -> list[dict]:
-    """The stored conversation, numbered by user message; a prompt with none recorded (an episode's turn) is one turn
-    of its prompt and reply."""
+    """The stored conversation, numbered by user message; without one (an episode's turn), its prompt and reply."""
     conversation_id = (context.metadata.get("a2a_conversations") or {}).get(prompt_response.step_id)
     if conversation_id is None:
         return [_message(1, "user", [{"kind": "text", "text": prompt_response.prompt_text or ""}]),

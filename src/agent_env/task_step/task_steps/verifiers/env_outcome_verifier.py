@@ -24,9 +24,7 @@ logger = logging.getLogger(__name__)
 
 
 class EnvOutcomeVerifierTaskStep(TaskStep):
-    """Runs the artifact's ``async verify(mcp_url)`` against the deployed env and scores what it returns. A
-    ``verify(mcp_url, run)`` is also handed the run it grades (``run_context.RunContext``): the conversation of
-    ``prompt_id``'s prompt, the run's last prompt when unset, and the trigger firing logs."""
+    """Runs the artifact's ``verify(mcp_url)``; a ``run`` parameter also gets the ``RunContext`` of ``prompt_id``."""
 
     type: ClassVar[str] = "env_outcome_verifier"
     entity_refs = (
@@ -121,8 +119,9 @@ class EnvOutcomeVerifierTaskStep(TaskStep):
             spec.loader.exec_module(module)
 
             logger.info(f"Running verify() from artifact '{self.file_artifact_id}' against {deployed.mcp_url}")
-            if len(inspect.signature(module.verify).parameters) >= 2:
-                results = await module.verify(deployed.mcp_url, await load_run_context(context, self._graded_prompt(context)))
+            if "run" in inspect.signature(module.verify).parameters:
+                run = await load_run_context(context, self._graded_prompt(context))
+                results = await module.verify(deployed.mcp_url, run=run)
             else:
                 results = await module.verify(deployed.mcp_url)
 

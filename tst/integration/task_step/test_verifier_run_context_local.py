@@ -1,6 +1,4 @@
-"""A verifier is handed the run it grades: after a real two-turn conversation on the local defaults, with the echo
-agent (tst/data/a2a_agent) as both solver and user-sim, the run context reads back every turn prompt_agent stored, the
-user-sim's included. Needs Docker and a throwaway local registry."""
+"""A real two-turn conversation (echo agent as solver and user-sim) reads back whole through load_run_context."""
 
 import uuid
 
