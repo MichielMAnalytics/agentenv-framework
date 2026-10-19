@@ -174,10 +174,8 @@ def resolve_context_facts(facts: dict[str, str], metadata: dict) -> list[tuple[s
     return rendered
 
 
-# What of the run beyond its trajectory `run_context_for_judge` may show the judge, and the bounds on how much.
+# What of the run beyond its trajectory `run_context_for_judge` may show the judge.
 RUN_CONTEXT_PARTS = ("conversation", "trigger_log")
-RUN_CONTEXT_MESSAGE_MAX_CHARS = 4000  # a longer message is cut and ends in "…"
-RUN_CONTEXT_EVENTS_MAX = 200          # per firing log, the most recent; the rest are counted
 
 
 def _validated_run_context_parts(parts: Optional[list[str]]) -> Optional[list[str]]:
@@ -208,19 +206,20 @@ def render_run_context(run: RunContext, parts: list[str]) -> str:
                 files = sum(1 for p in m["parts"] if p.get("kind") != "text")
                 extra = f" (+{files} non-text part{'s' if files != 1 else ''})" if files else ""
                 lines.append(f"- {m['role']}{f' ({who})' if who else ''}: "
-                             f"{_cut(m['text'], RUN_CONTEXT_MESSAGE_MAX_CHARS)}{extra}")
+                             f"{_cut(m['text'], RubricsVerifierTaskStep.RUN_CONTEXT_MESSAGE_MAX_CHARS)}{extra}")
         sections.append("\n".join(lines))
     if "trigger_log" in parts:
         lines = ["## Trigger firings", "What the env's triggers and the user agent's triggers did during the run, "
                  "oldest first, one firing-log event per line."]
         logs = [(f"env {env_id}", events) for env_id, events in run.env_trigger_events.items()]
         logs += [("user agent", run.agent_trigger_events)] if run.agent_trigger_events else []
+        events_max = RubricsVerifierTaskStep.RUN_CONTEXT_EVENTS_MAX
         for name, events in logs:
             lines.append(f"### {name}")
-            if len(events) > RUN_CONTEXT_EVENTS_MAX:
-                lines.append(f"({len(events) - RUN_CONTEXT_EVENTS_MAX} earlier events not shown)")
+            if len(events) > events_max:
+                lines.append(f"({len(events) - events_max} earlier events not shown)")
             lines += [f"- {json.dumps({k: v for k, v in e.items() if k != 'seq'}, default=str)}"
-                      for e in events[-RUN_CONTEXT_EVENTS_MAX:]]
+                      for e in events[-events_max:]]
         lines += [f"(not available: {what}: {why})" for what, why in run.unavailable.items() if what != "conversation"]
         if len(lines) == 2:
             lines.append("(no trigger firings were recorded)")
@@ -365,6 +364,8 @@ class RubricsVerifierTaskStep(TaskStep):
     DEFAULT_JUDGE_TIMEOUT_SECONDS: ClassVar[int] = 1000
     DEFAULT_MAX_RETRIES: ClassVar[int] = 3
     DEFAULT_POLL_INTERVAL_SECONDS: ClassVar[int] = 10
+    RUN_CONTEXT_MESSAGE_MAX_CHARS: ClassVar[int] = 4000  # a longer message is cut and ends in "…"
+    RUN_CONTEXT_EVENTS_MAX: ClassVar[int] = 200  # per firing log, the most recent; the rest are counted
     TRAJECTORY_CONTAINER_PATH: ClassVar[str] = "/tmp/prompt_trajectory.json"
     # Multi-turn agent judge: base for a per-run subdir holding turn_NN.json files.
     TRAJECTORY_CONTAINER_DIR: ClassVar[str] = "/tmp/prompt_trajectory_turns"

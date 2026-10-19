@@ -15,12 +15,7 @@ from agent_env.artifact import FileArtifact
 from agent_env.config import get_config
 from agent_env.task_step.context import PromptResponse, TaskStepContext
 from agent_env.task_step.task_steps.verifiers.env_outcome_verifier import EnvOutcomeVerifierTaskStep
-from agent_env.task_step.task_steps.verifiers.rubrics_verifier import (
-    RUN_CONTEXT_EVENTS_MAX,
-    RUN_CONTEXT_MESSAGE_MAX_CHARS,
-    RubricsVerifierTaskStep,
-    render_run_context,
-)
+from agent_env.task_step.task_steps.verifiers.rubrics_verifier import RubricsVerifierTaskStep, render_run_context
 from agent_env.task_step.task_steps.verifiers.run_context import RunContext, load_run_context
 
 TURNS = [("Can you book lunch with Dana?", "Booked for noon."),
@@ -278,16 +273,17 @@ async def test_the_judge_sees_only_the_parts_it_asks_for(monkeypatch):
 
 
 def test_a_long_message_and_a_long_firing_log_are_bounded_and_a_missing_log_is_named():
-    long = "x" * (RUN_CONTEXT_MESSAGE_MAX_CHARS + 50)
+    max_chars = RubricsVerifierTaskStep.RUN_CONTEXT_MESSAGE_MAX_CHARS
+    long = "x" * (max_chars + 50)
     run = RunContext(
         conversation=[{"turn": 1, "role": "user", "text": long, "parts": _text(long) + [{"kind": "file"}], "ts": None}],
         env_trigger_events={"calendar": [{"seq": i, "kind": "fired", "trigger_id": f"t{i}"}
-                                         for i in range(RUN_CONTEXT_EVENTS_MAX + 3)]},
+                                         for i in range(RubricsVerifierTaskStep.RUN_CONTEXT_EVENTS_MAX + 3)]},
         unavailable={"env_trigger_events.mail": "TimeoutError: capture budget of 90s exceeded"})
 
     text = render_run_context(run, ["conversation", "trigger_log"])
 
-    assert "x" * RUN_CONTEXT_MESSAGE_MAX_CHARS + "… (+1 non-text part)" in text and long not in text
+    assert "x" * max_chars + "… (+1 non-text part)" in text and long not in text
     assert "(3 earlier events not shown)" in text and '"t2"' not in text and '"t3"' in text
     assert "(not available: env_trigger_events.mail: TimeoutError: capture budget of 90s exceeded)" in text
     assert "(no trigger firings were recorded)" in render_run_context(RunContext(), ["trigger_log"])
