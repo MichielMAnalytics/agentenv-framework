@@ -386,6 +386,13 @@ def _hold(tagged_contexts, interrupts: Interrupts) -> None:
     _tear_down_kept(kept)
 
 
+def _ended(runs) -> list:
+    """Each run that ended on its own, with its stored context: what ``--keep`` leaves this command to tear down. The
+    runner tears a cancelled one down itself."""
+    return [(run.tag, TaskStepContext.from_dict(run.instance.context)) for run in runs
+            if run.done and run.record.status is not RunStatus.CANCELED and run.instance and run.instance.context]
+
+
 def _stored(task, context: TaskStepContext) -> str:
     """A new instance holding ``context``, for the runner to continue a run from, recorded where the task's run records
     go. A write that fails raises: the run would otherwise continue from an empty context."""
@@ -487,18 +494,22 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
     tags = [f"[run {i}]" for i in range(1, k + 1)] if k > 1 else [""]
     submissions = [(tag, task, copy.deepcopy(initial_context.metadata),
                     _stored(task, initial_context) if context_json else None) for tag in tags]
+    runs: list[submitted_runs.SubmittedRun] = []
     with Interrupts() as interrupts:
-        runs = submitted_runs.follow(interrupts, submissions, agent_model=agent_model,
-                                     agent_artifact_id=agent_artifact_id, step_lines=_step_output_lines if k == 1 else None)
+        try:
+            submitted_runs.follow(interrupts, submissions, runs, agent_model=agent_model,
+                                  agent_artifact_id=agent_artifact_id, step_lines=_step_output_lines if k == 1 else None)
+        except Exception:
+            if keep and (kept := _kept(_ended(runs))):
+                _tear_down_kept(kept)
+            raise
         interrupted = interrupts.signum if interrupts.count else None
         click.echo()
-        ended, unexported = [], False
+        unexported = False
         for run in runs:
             if run.instance is None or run.instance.context is None:
                 continue
             context = TaskStepContext.from_dict(run.instance.context)
-            if run.done and run.record.status is not RunStatus.CANCELED:
-                ended.append((run.tag, context))
             prefix = f"{run.tag} " if run.tag else ""
             try:
                 _write_context(context, task.id, output_dir, prefix=prefix)
@@ -513,7 +524,7 @@ def run(task_id: str, task_version: int | None, output_dir: str | None, k: int, 
         elif k > 1:
             click.echo(click.style(f"{completed}/{k} runs completed, {k - completed}/{k} failed.", fg="red"))
         if keep:
-            _settle_kept(ended, interrupts, interrupted)
+            _settle_kept(_ended(runs), interrupts, interrupted)
     if interrupted is not None:
         raise SystemExit(128 + interrupted)
     if completed < k or unexported:

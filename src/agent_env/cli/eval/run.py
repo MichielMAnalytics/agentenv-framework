@@ -73,9 +73,10 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
 
     submissions = [(f"[{task.id} run {i}]" if k > 1 else f"[{task.id}]", task, copy.deepcopy(base_metadata), None)
                    for task in tasks for i in range(1, k + 1)]
+    runs: list[submitted_runs.SubmittedRun] = []
     with Interrupts() as interrupts:
-        runs = submitted_runs.follow(interrupts, submissions, agent_model=agent_model,
-                                     agent_artifact_id=agent_artifact_id, limit=max_concurrency)
+        submitted_runs.follow(interrupts, submissions, runs, agent_model=agent_model,
+                              agent_artifact_id=agent_artifact_id, limit=max_concurrency)
 
     click.echo()
 

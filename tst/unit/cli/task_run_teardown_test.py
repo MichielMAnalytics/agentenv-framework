@@ -208,6 +208,26 @@ def test_a_cancel_another_runner_cant_carry_out_leaves_a_kept_run_kept_and_torn_
     assert "Holding 2 sandboxes up" in result.output and _ids(torn_down) == ["sb-1", "sb-2"]
 
 
+def test_an_error_following_kept_runs_still_tears_down_one_that_ended(monkeypatch, tmp_path, torn_down):
+    real_status, ended = local_runner.LocalRunner.status, []
+
+    async def status(self, run_id):
+        record = await real_status(self, run_id)
+        if ended and run_id not in ended:
+            raise RuntimeError("run index unreachable")
+        if record.status is RunStatus.COMPLETED:
+            ended.append(run_id)
+        return record
+
+    monkeypatch.setattr(local_runner.LocalRunner, "status", status)
+    task = _OneQuickOneSlow()
+
+    result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2", "--keep")
+
+    assert isinstance(result.exception, RuntimeError), result.output
+    assert _ids(torn_down) == ["sb-1", "sb-2"]
+
+
 def test_keep_writes_the_context_of_a_run_that_failed(monkeypatch, tmp_path, torn_down):
     task = _Deploys(ending=RuntimeError("boom"))
 

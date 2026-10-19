@@ -44,16 +44,14 @@ class SubmittedRun:
         return f"{self.record.status}" + (f": {self.record.error}" if self.record.error else "")
 
 
-def follow(interrupts: Interrupts, submissions, *, step_lines=None, **submit_kwargs) -> list[SubmittedRun]:
-    """Submit each ``(tag, task, metadata, instance_id)`` and follow the runs to the end, echoing each step that ends
-    (with ``step_lines(step, context)`` when given, else a verifier's score). A first Ctrl-C cancels the runs; a
-    second stops waiting for them."""
-    runs: list[SubmittedRun] = []
+def follow(interrupts: Interrupts, submissions, runs: list[SubmittedRun], *, step_lines=None, **submit_kwargs) -> None:
+    """Submit each ``(tag, task, metadata, instance_id)`` into ``runs`` and follow the runs to the end, echoing each step
+    that ends (with ``step_lines(step, context)`` when given, else a verifier's score). A first Ctrl-C cancels the
+    runs; a second stops waiting for them. ``runs`` holds what was submitted even when following raises."""
     [outcome] = interrupts.run(interrupts.gather([_submit_and_follow(submissions, runs, step_lines, **submit_kwargs)],
                                                  _on_signal))
     if not outcome.cancelled() and outcome.exception() is not None:
         raise outcome.exception()
-    return runs
 
 
 async def _submit_and_follow(submissions, runs, step_lines, *, limit=None, **submit_kwargs) -> None:
