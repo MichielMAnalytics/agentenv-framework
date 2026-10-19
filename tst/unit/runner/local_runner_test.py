@@ -386,6 +386,24 @@ async def test_a_run_given_an_instance_continues_it_from_its_stored_context(docs
 
 
 @pytest.mark.asyncio
+async def test_a_run_given_an_instance_of_another_version_fails_without_running(docs, monkeypatch):
+    from agent_env.task.store import register_task_instance
+
+    register_task_instance("t1", 3, 2, 1, instance_id="inst-1")
+    task = _FakeTask()
+    _install_task(monkeypatch, task)
+    runner = LocalRunner(workers=1)
+    handle = await runner.submit("t1", 4, instance_id="inst-1")
+    try:
+        record = await _drain(runner, handle.run_id)
+    finally:
+        await runner.stop()
+
+    assert record.status is RunStatus.FAILED and "is a run of t1 v3, not of t1 v4" in record.error
+    assert task.calls == []
+
+
+@pytest.mark.asyncio
 async def test_stop_lets_a_teardown_under_way_finish(docs, monkeypatch):
     from agent_env.runner import local_runner
     from agent_env.task.teardown import TeardownReport
