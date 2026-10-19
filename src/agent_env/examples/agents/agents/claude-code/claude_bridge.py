@@ -414,6 +414,20 @@ def _descendants(pid: int) -> list[int]:
     return found
 
 
+async def _started(spawn):
+    """The CLI ``spawn`` starts. A turn cancelled while it starts lets it finish starting, then kills it and what it
+    started: asyncio would kill the CLI alone, and leave its tools running."""
+    start = asyncio.ensure_future(spawn)
+    try:
+        return await asyncio.shield(start)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            proc = await start
+            _kill_cli(proc)
+            await _reap(proc)
+        raise
+
+
 _STDOUT_READ_BYTES = 64 * 1024
 
 
@@ -512,7 +526,7 @@ async def _spawn_claude(
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
                    max_turns=max_turns)
     logger.info(f"Running claude CLI (resume={resume}, session_id={session_id}, model={model})")
-    proc = await asyncio.create_subprocess_exec(
+    proc = await _started(asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
@@ -520,7 +534,7 @@ async def _spawn_claude(
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
                     max_thinking_tokens=max_thinking_tokens),
         start_new_session=True,
-    )
+    ))
     trajectory: list[dict] = []
     tool_count = 0
     cli_session_id: str | None = None
