@@ -23,8 +23,16 @@ def test_the_configured_endpoint_is_the_clis_with_its_key_as_a_bearer_token():
 
     assert (env["ANTHROPIC_AUTH_TOKEN"], env["ANTHROPIC_BASE_URL"], env["ANTHROPIC_API_KEY"]) == (
         "gateway-key", "https://gateway.example.com", "")
-    assert "LITELLM_API_KEY" not in env and "LITELLM_EXTRA_HEADERS" not in env
     assert env["CLAUDE_CODE_ATTRIBUTION_HEADER"] == "0"
+
+
+def test_a_script_the_model_runs_can_call_the_endpoint_with_the_litellm_variables():
+    headers = json.dumps({"X-Bill-To": "team-a"})
+
+    env = claude_bridge.cli_env({**GATEWAY, "LITELLM_EXTRA_HEADERS": headers})
+
+    kept = {name: env[name] for name in (*GATEWAY, "LITELLM_EXTRA_HEADERS")}
+    assert kept == {**GATEWAY, "LITELLM_EXTRA_HEADERS": headers}
 
 
 def test_anthropic_variables_already_set_are_kept():

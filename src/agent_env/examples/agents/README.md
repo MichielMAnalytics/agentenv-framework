@@ -7,7 +7,8 @@ from another bundle as `@local/agentenv-framework/agents/claude-code`.
 
 It needs Docker, and a model endpoint serving Anthropic's Messages API, `<base>/v1/messages`, which a LiteLLM gateway
 does: the `[model]` base URL and key reach it as `ANTHROPIC_BASE_URL` and a bearer token, and `[model.headers]` are sent
-on every model call. Building the image downloads Claude Code, which is Anthropic's software under its
+on every model call. The `LITELLM_*` variables stay in its environment too, so a script the model runs can call the
+endpoint. Building the image downloads Claude Code, which is Anthropic's software under its
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); the image is built where it runs and never
 published. The CLI's version is the Dockerfile's `CLAUDE_CODE_VERSION`.
 

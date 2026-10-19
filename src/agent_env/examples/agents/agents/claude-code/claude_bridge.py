@@ -143,8 +143,9 @@ def _model_headers(raw: str | None) -> dict[str, str]:
 def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id: str | None = None,
             task_id: str | None = None, max_thinking_tokens: int | None = None) -> dict[str, str]:
     """The CLI's environment: this process's, pointed at the endpoint agent-env configured (its key as a bearer
-    token, so an API key too would conflict, and no longer as LITELLM_API_KEY), with the endpoint's headers and the
-    run's attribution, and the model's aliases pinned to ``model`` on that endpoint. A variable already set is kept."""
+    token, so an API key too would conflict), with the endpoint's headers and the run's attribution, and the model's
+    aliases pinned to ``model`` on that endpoint. A variable already set is kept, LITELLM_* too, so a script the model
+    runs can call the endpoint."""
     env = dict(environ)
     if not env.get("ANTHROPIC_AUTH_TOKEN") and env.get("LITELLM_API_KEY"):
         env["ANTHROPIC_AUTH_TOKEN"] = env["LITELLM_API_KEY"]
@@ -155,9 +156,7 @@ def cli_env(environ: Mapping[str, str], *, model: str | None = None, project_id:
     if model and env.get("ANTHROPIC_BASE_URL"):
         for alias in _MODEL_ALIASES:
             env.setdefault(alias, model)
-    headers = {**_model_headers(env.pop(MODEL_HEADERS_ENV, None)), **_attribution_headers(project_id, task_id)}
-    # Mapped to Anthropic's variables above, so the CLI's tools don't get the key twice.
-    env.pop("LITELLM_API_KEY", None)
+    headers = {**_model_headers(env.get(MODEL_HEADERS_ENV)), **_attribution_headers(project_id, task_id)}
     if headers:
         env["ANTHROPIC_CUSTOM_HEADERS"] = "\n".join(f"{name}: {value}" for name, value in headers.items())
     if max_thinking_tokens:
