@@ -997,8 +997,7 @@ function main(): void {
     );
   }
 
-  // A website request is named by method, site, path and status, whether it
-  // matched a website trigger or prompted a state trigger's re-evaluation.
+  // A website request names the cause of website and state-trigger detections alike.
   {
     const request = {
       source: 'website',

@@ -2718,11 +2718,11 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
                                   "barrier": {"at": "provoking_call", "timeout_seconds": 0}, "actions": []},
          "positive, finite"),
         ("repeat on a state trigger", {"id": "b", "when": dict(state_when, repeat=True), "actions": []},
-         "only valid on action and website triggers"),
+         "only valid on action triggers"),
         ("ctx placeholder on a state trigger", {"id": "b", "when": state_when,
                                                 "actions": [{"type": "tool", "tool": "move_email",
                                                              "args": {"email_id": "${result.email_id}"}}]},
-         "only action and website triggers carry"),
+         "only action triggers carry"),
     ]
     try:
         result = await email_env.deploy()
@@ -2753,9 +2753,7 @@ async def test_gateway_trigger_registration_is_fail_loud(sandbox_provider, mcp_s
 @pytest.mark.asyncio
 @pytest.mark.integration
 async def test_gateway_website_trigger_fires_on_a_request_through_the_website_proxy(slack_website_env):
-    """A request to the env's website through the gateway's /website proxy, as an agent's own browser makes it,
-    provokes a website trigger: the barrier holds the page until the action has landed, and the firing log attributes
-    the request. Only the request the trigger names fires it."""
+    """A request through the /website proxy fires the website trigger that names it, held by its barrier and attributed."""
     visit = {"id": "visit", "when": {"type": "website", "app": "slack", "method": "GET", "path": {"equals": "/"}},
              "barrier": {"at": "provoking_call"},
              "actions": [{"type": "permission", "action": "disable", "role": "default", "tools": ["list_website_urls"]}]}

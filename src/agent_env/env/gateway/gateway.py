@@ -510,25 +510,21 @@ class Gateway:
                              mcp_server=url_map is self.rest_proxy_urls and service_name.startswith("mcp-"))
 
     async def _proxy_website_request(self, request: Request) -> Response:
-        """Proxy a request to one of the env's websites, then, once the website has answered, feed it to the trigger
-        engine and hold the response for the barriers it provokes: an agent browsing with its own browser or HTTP
-        client provokes triggers as a tool call does."""
+        """Proxy a website request; with a website trigger registered, feed it to the engine and hold it for barriers."""
         response = await self._proxy_rest_request(request, url_map=self.website_urls)
         app = request.path_params["service_name"]
-        if app in self.website_urls:
-            barrier_tasks, barrier_timeout_s = self._fire_website_triggers(request, app, response.status_code,
-                                                                           await request.body())
+        if app in self.website_urls and self._trigger_engine.has_website_triggers:
+            barrier_tasks, barrier_timeout_s = await self._fire_website_triggers(request, app, response.status_code)
             await self._await_barriers(barrier_tasks, barrier_timeout_s)
         return response
 
-    def _fire_website_triggers(self, request: Request, app: str, status: int,
-                               body: bytes) -> tuple[list[asyncio.Task], float | None]:
-        """Feed an answered website request to the trigger engine (fail-open), with its path beneath the website's root
-        and its query and body fields as its args."""
+    async def _fire_website_triggers(self, request: Request, app: str,
+                                     status: int) -> tuple[list[asyncio.Task], float | None]:
+        """Feed an answered website request to the trigger engine (fail-open)."""
         try:
-            path = "/" + request.path_params.get("path", "")
-            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method, path,
-                                                           status, _request_args(request, body))
+            args = _request_args(request, await request.body())
+            return self._trigger_engine.on_website_request(self._request_role(request), app, request.method,
+                                                           "/" + request.path_params.get("path", ""), status, args)
         except Exception:
             logger.exception("Trigger evaluation failed (fail-open)")
             return [], None
@@ -1219,8 +1215,7 @@ class _ProxyArgModelBase(ArgModelBase):
 
 
 def _request_args(request: Request, body: bytes) -> dict:
-    """A website request's args, as a trigger reads them: its query parameters, then the fields of a urlencoded form or
-    JSON-object body, which win a clash. A parameter given more than once is the list of its values."""
+    """A request's query parameters and form or JSON-object body fields (the body wins a clash; repeats become lists)."""
     args = _fields(parse_qsl(request.url.query, keep_blank_values=True))
     media_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
     if media_type == "application/x-www-form-urlencoded":

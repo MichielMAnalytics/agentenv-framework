@@ -1,5 +1,4 @@
-"""Website triggers (urn:agentenv:triggers/v1, `when.type: website`): a request the gateway proxies to one of its
-websites provokes triggers as a tool call does, for an agent that browses with its own browser or HTTP client."""
+"""Website triggers (`when.type: website`): a request the gateway proxies to a website provokes triggers like a tool call."""
 from __future__ import annotations
 
 import asyncio
@@ -112,7 +111,7 @@ def test_registration_normalizes_the_method_and_state_echoes_the_request_matcher
                               "where": {"to": {"exists": True}}},
             "barrier": {"at": "provoking_call", "timeout_seconds": 5}}
     engine.register({"triggers": [spec]})
-    engine.register({"triggers": [spec]})  # identical re-add: no-op, though the stored method was upper-cased
+    engine.register({"triggers": [spec]})
     [state] = engine.state()["triggers"]
     assert state["type"] == "website" and state["barrier"] == {"at": "provoking_call", "timeout_seconds": 5}
     assert state["when"] == {"type": "website", "app": "mail", "method": "POST", "path": {"regex": "^/api/messages/?$"},
@@ -148,7 +147,7 @@ async def test_only_a_request_matching_app_method_path_status_and_where_provokes
         ("shop", "POST", "/api/messages", 201, MESSAGE),
         ("mail", "GET", "/api/messages", 200, MESSAGE),
         ("mail", "POST", "/api/messages/7/archive", 200, MESSAGE),
-        ("mail", "POST", "/api/messages", 500, MESSAGE),  # no status predicate: a failed request is no provoking call
+        ("mail", "POST", "/api/messages", 500, MESSAGE),
         ("mail", "POST", "/api/messages", 201, {**MESSAGE, "to": "lee@elsewhere.test"}),
         ("mail", "POST", "/api/messages/", 303, MESSAGE),
     ]:
@@ -250,8 +249,7 @@ def _gateway() -> Gateway:
 
 async def _request(gw: Gateway, method: str, target: str, *, headers: dict | None = None, body: bytes = b"",
                    order: list | None = None) -> int:
-    """Run one request through the gateway's ASGI app, as uvicorn would build its scope; returns the status, and appends
-    "response" to `order` when the status line goes out."""
+    """Run one request through the gateway's ASGI app; return its status, appending "response" to `order` at the status line."""
     url = urlsplit(target)
     scope = {
         "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"}, "http_version": "1.1",
@@ -320,6 +318,7 @@ async def test_the_proxy_hands_the_engine_the_role_path_status_and_args_of_each_
     website = _Website(status=200)
     website.install(monkeypatch)
     gw = _gateway()
+    gw._trigger_engine.register({"triggers": [REPLY]})
     seen: list[tuple] = []
     gw._trigger_engine.on_website_request = lambda *a: seen.append(a) or ([], None)
     form = {"content-type": "application/x-www-form-urlencoded; charset=utf-8"}
@@ -347,9 +346,57 @@ async def test_the_proxy_hands_the_engine_the_role_path_status_and_args_of_each_
 
 
 @pytest.mark.asyncio
+async def test_without_a_website_trigger_the_proxy_neither_reads_requests_nor_rechecks_state_triggers(monkeypatch):
+    _Website(status=201).install(monkeypatch)
+    calls: list[str] = []
+
+    async def internal_call(self, tool_name, arguments, role=None):
+        calls.append(tool_name)
+        return _result({"subjects": ["Lunch?"]})
+
+    monkeypatch.setattr(TriggerEngine, "_internal_call", internal_call)
+    gw = _gateway()
+    gw._trigger_engine.register({"triggers": [{"id": "sent", "actions": [], "when": {"type": "state", "check": {
+        "tool": "mail_list_messages", "extract": "subjects", "predicate": {"regex": "Lunch"}}}}]})
+    seen: list[tuple] = []
+    real = gw._trigger_engine.on_website_request
+    gw._trigger_engine.on_website_request = lambda *a: seen.append(a) or real(*a)
+
+    assert await _request(gw, "POST", "/website/mail/api/messages", headers={"content-type": "application/json"},
+                          body=json.dumps(MESSAGE).encode()) == 201
+    await asyncio.sleep(0.1)
+
+    assert seen == [] and calls == [] and gw._trigger_engine._triggers["sent"]["status"] == "armed"
+
+
+@pytest.mark.asyncio
+async def test_with_a_website_trigger_a_mutating_website_request_rechecks_the_state_triggers(monkeypatch):
+    _Website(status=201).install(monkeypatch)
+    calls: list[str] = []
+
+    async def internal_call(self, tool_name, arguments, role=None):
+        calls.append(tool_name)
+        return _result({"subjects": ["Lunch?"], "delivered": True})
+
+    monkeypatch.setattr(TriggerEngine, "_internal_call", internal_call)
+    gw = _gateway()
+    gw._trigger_engine.register({"triggers": [
+        {"id": "sent", "actions": [], "when": {"type": "state", "check": {
+            "tool": "mail_list_messages", "extract": "subjects", "predicate": {"regex": "Lunch"}}}},
+        {**REPLY, "when": {**REPLY["when"], "path": {"equals": "/never"}}}]})
+
+    await _request(gw, "POST", "/website/mail/api/messages", headers={"content-type": "application/json"},
+                   body=json.dumps(MESSAGE).encode())
+    await asyncio.sleep(0.1)
+
+    assert calls == ["mail_list_messages"] and gw._trigger_engine._triggers["sent"]["status"] == "fired"
+
+
+@pytest.mark.asyncio
 async def test_a_failing_trigger_evaluation_still_answers_the_request(monkeypatch):
     _Website(status=200).install(monkeypatch)
     gw = _gateway()
+    gw._trigger_engine.register({"triggers": [REPLY]})
 
     def explode(*_):
         raise RuntimeError("boom")

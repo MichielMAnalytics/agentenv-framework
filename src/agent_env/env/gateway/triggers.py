@@ -1,6 +1,5 @@
 """Typed Action/State trigger engine (urn:agentenv:triggers/v1) hosted on the gateway:
-post-call detection on watched-role traffic (tool calls and requests to the env's websites), async fail-open
-firing, additive fail-loud registration."""
+post-call detection on watched-role traffic, async fail-open firing, additive fail-loud registration."""
 from __future__ import annotations
 
 import asyncio
@@ -28,8 +27,7 @@ logger = logging.getLogger(__name__)
 
 _PREDICATE_KEYS = ("regex", "equals", "exists")
 _WHEN_TYPES = ("action", "state", "time", "website")
-# The provoking-call roots each when.type's templates and `where` read; a type absent here has no provoking call. A
-# website response streams through the proxy unread, so a website request carries no result.
+# The provoking-call roots each when.type's templates and `where` read; a website response streams through unread.
 _CTX_ROOTS = {"action": ("args", "result"), "website": ("args",)}
 # RFC 9110's safe methods: a request using one asks for no change, so it prompts no state re-evaluation.
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
@@ -331,8 +329,8 @@ def _validate_path(path: str, where: str) -> None:
 
 
 def _validate_placeholders(value: Any, where: str, roots: tuple[str, ...]) -> None:
-    """Fail-loud at registration: `${args.*}` / `${result.*}` only where the trigger's provoking call carries that
-    root (`roots`, from _CTX_ROOTS), any other placeholder must be a bare check-binding name. A shape the templater
+    """Fail-loud at registration: `${args.*}` / `${result.*}` only on triggers that carry a provoking call
+    (`roots`), any other placeholder must be a bare check-binding name. A shape the templater
     cannot parse is rejected first, or it would reach the tool as literal text."""
     inert = _inert_placeholders(value)
     if inert:
@@ -345,7 +343,8 @@ def _validate_placeholders(value: Any, where: str, roots: tuple[str, ...]) -> No
             if re.fullmatch(r"\w+", name) is None:
                 raise TriggerError(f"{where}: placeholder ${{{name}}} must be a check binding name or an args./result. path")
         elif not roots:
-            raise TriggerError(f"{where}: ${{{name}}} needs a provoking call; only action and website triggers carry one")
+            raise TriggerError(f"{where}: ${{{name}}} needs a provoking tool call; only action triggers carry args/result "
+                               "(website triggers carry args)")
         elif root_name not in roots:
             raise TriggerError(f"{where}: ${{{name}}} reads a result; a website request carries args, not a result")
         elif path:
@@ -640,8 +639,8 @@ class TriggerEngine:
         if at not in _BARRIER_AT:
             raise TriggerError(f"{w}.at must be one of {list(_BARRIER_AT)} (got {at!r})")
         if at == "provoking_call" and not has_ctx:
-            raise TriggerError(f"{w}.at 'provoking_call' is only valid on action and website triggers — they alone "
-                               "have a provoking call to hold")
+            raise TriggerError(f"{w}.at 'provoking_call' is only valid on action triggers and website triggers — they "
+                               "alone have a provoking call to hold")
         timeout = barrier.get("timeout_seconds")
         if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
                                     or not math.isfinite(timeout) or timeout <= 0):
@@ -665,13 +664,13 @@ class TriggerEngine:
             self._normalize_website_when(when, tid)
         elif when["type"] == "state":
             if "repeat" in when:
-                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action and website triggers")
+                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action triggers and website triggers")
             when["check"] = _validate_check(when.get("check"), f"trigger '{tid}': when.check")
             for j, step in enumerate(when["check"]["steps"]):
                 _validate_placeholders(step.get("args", {}), f"trigger '{tid}': when.check.steps[{j}].args", roots)
         else:
             if "repeat" in when:
-                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action and website triggers "
+                raise TriggerError(f"trigger '{tid}': when.repeat is only valid on action triggers and website triggers "
                                    "(time triggers recur via 'every')")
             self._normalize_time_when(when, tid)
         self._normalize_barrier(spec, tid, bool(roots))
@@ -696,7 +695,7 @@ class TriggerEngine:
             when.pop("roles", None)
             return
         if when["type"] == "time":
-            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action, state and website triggers")
+            raise TriggerError(f"trigger '{tid}': when.roles is only valid on action and state triggers, and website triggers")
         roles = when["roles"]
         if not isinstance(roles, list) or not roles or not all(isinstance(r, str) and r for r in roles):
             raise TriggerError(f"trigger '{tid}': when.roles must be a non-empty list of non-empty AgentEnv-Roles")
@@ -709,8 +708,7 @@ class TriggerEngine:
         _normalize_provoked_when(when, tid)
 
     def _normalize_website_when(self, when: dict, tid: str) -> None:
-        """Validate a when.type=='website' spec: one of the gateway's websites, the method (normalized to upper case),
-        the `path` and `status` predicates, then `where` over the request's args and `repeat`."""
+        """Validate a website `when`: a known app, upper-cased method, `path`/`status` predicates, `where`, `repeat`."""
         w = f"trigger '{tid}'"
         app = when.get("app")
         if not isinstance(app, str) or not app:
@@ -863,7 +861,8 @@ class TriggerEngine:
         """Synchronous post-call detection hook (invoked from the gateway's role-filter wrapper).
 
         Returns the fire tasks of triggers whose barrier waits at `provoking_call`, and how long to
-        hold the call for (see _detect).
+        hold the call for: the widest of their timeouts, counting an omitted one as the gateway
+        default so a neighbour's tighter ask cannot cut it short.
         """
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
@@ -899,10 +898,7 @@ class TriggerEngine:
 
     def on_website_request(self, role: str, app: str, method: str, path: str, status: int,
                            args: dict) -> tuple[list[asyncio.Task], float | None]:
-        """Synchronous detection hook for a request the gateway proxied to its website ``app``, invoked once the website
-        has answered with ``status`` and before the response is passed on; returns what on_tool_call does. ``path`` is
-        the request's path beneath the website's root, ``args`` its query and body fields. A request that asks for a
-        change (an unsafe method) and did not fail prompts the state triggers as a non-readonly tool call does."""
+        """Detection hook for an answered website request, before its response goes out; returns what on_tool_call does."""
         provokable = [(tid, trig) for tid, trig in self._triggers.items() if self._provoked_by(trig, role)]
         if not provokable:
             return [], None
@@ -919,10 +915,7 @@ class TriggerEngine:
 
     def _detect(self, matched: list[tuple[str, dict]], provoking: dict,
                 ctx: dict) -> tuple[list[asyncio.Task], float | None]:
-        """Detect each trigger the provoking call matched whose `where` holds and that can take it (armed, or a repeat
-        one mid-fire). Returns the fires whose barrier waits at `provoking_call`, and how long to hold the call for:
-        the widest of their timeouts, counting an omitted one as the gateway default so a neighbour's tighter ask
-        cannot cut it short."""
+        """Detect the matched triggers whose `where` holds and that can take the call; returns what on_tool_call does."""
         pending: list[asyncio.Task] = []
         timeout_s: float | None = None
         for tid, trig in matched:
@@ -945,6 +938,10 @@ class TriggerEngine:
             if trig["status"] == "armed" and trig["spec"]["when"]["type"] == "state" and not trig["evaluating"]:
                 trig["evaluating"] = True
                 self._schedule(self._eval_state(tid, trig, provoking))
+
+    @property
+    def has_website_triggers(self) -> bool:
+        return any(t["spec"]["when"]["type"] == "website" for t in self._triggers.values())
 
     def _provoked_by(self, trig: dict, role: str) -> bool:
         """Whether a call by ``role`` can provoke ``trig``: the roles its `when` (or a deadline's `unless`) lists, else the
@@ -1485,8 +1482,7 @@ def _delay_rngs(spec: dict) -> dict[int, random.Random]:
 
 
 def _normalize_provoked_when(when: dict, tid: str) -> None:
-    """Validate what action and website triggers share: `where` predicates over the roots their provoking call carries,
-    and `repeat`. A bare `where` key is a top-level argument whatever its name."""
+    """Validate what action and website triggers share: `where` over their provoking call's roots, and `repeat`."""
     roots = _CTX_ROOTS[when["type"]]
     where = when.get("where", {})
     if not isinstance(where, dict):
@@ -1504,8 +1500,7 @@ def _normalize_provoked_when(when: dict, tid: str) -> None:
 
 
 def _website_matches(when: dict, app: str, method: str, path: str, status: int) -> bool:
-    """Whether a website request matches a website trigger's `when`, `where` aside. Without a `status` predicate only
-    a response below 400 matches, as only a tool call that did not fail provokes an action trigger."""
+    """Whether a request matches a website `when` (`where` aside); without `status`, only a response below 400 does."""
     if when["type"] != "website" or when["app"] != app or when.get("method", method) != method:
         return False
     if "path" in when and not _eval_predicate(when["path"], path):
