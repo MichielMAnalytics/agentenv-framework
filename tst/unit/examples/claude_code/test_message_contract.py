@@ -31,7 +31,12 @@ def calls(monkeypatch) -> Calls:
 
     async def _run_claude(**kwargs):
         recorded.append(kwargs)
-        return recorded.result_for(kwargs)
+        result = recorded.result_for(kwargs)
+        # As the CLI does: the session's transcript is on disk once a turn has run.
+        transcript = claude_bridge.session_jsonl_path(result.session_id or kwargs["session_id"])
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{"type": "assistant"}\n')
+        return result
 
     monkeypatch.setattr(a2a_server, "run_claude", _run_claude)
     return recorded
@@ -177,3 +182,34 @@ def test_the_default_timeout_is_thirty_minutes(calls, client):
 
 def test_session_references_outlive_the_frameworks_bounded_record():
     assert issubclass(a2a_server.ClaudeCodeAgent, kit.DurableSessionRefs)
+
+
+def test_a_turn_that_failed_before_the_cli_wrote_a_transcript_starts_its_session_afresh(monkeypatch, client):
+    seen = []
+
+    async def _run_claude(**kwargs):
+        seen.append((kwargs["session_id"], kwargs["resume"]))
+        if len(seen) == 1:
+            raise ValueError("output_format must be {...}")
+        return claude_bridge.ClaudeResult(response="ok", tool_call_count=0, session_id=kwargs["session_id"])
+
+    monkeypatch.setattr(a2a_server, "run_claude", _run_claude)
+
+    assert terminal(send(client, "one"))[0] == "failed"
+    assert terminal(send(client, "two"))[0] == "completed"
+    (first, _), (second, resumed) = seen
+    assert second == first and resumed is False
+
+
+def test_attachments_are_written_while_the_turn_holds_a_snapshot_load_off(monkeypatch, agent, calls, client):
+    active = []
+
+    async def _materialize(part, target_dir):
+        active.append("ctx-1" in agent._active_contexts)
+        return str(target_dir / "a.png")
+
+    monkeypatch.setattr(a2a_server, "materialize_file_part", _materialize)
+
+    send(client, [{"kind": "file", "file": {"name": "a.png", "mimeType": "image/png", "bytes": "cG5n"}}])
+
+    assert active == [True] and agent._active_contexts == set()

@@ -429,6 +429,8 @@ async def _started(spawn):
 
 
 _STDOUT_READ_BYTES = 64 * 1024
+# How much of a line the CLI shouldn't have printed is logged.
+_LOGGED_LINE_CHARS = 200
 
 
 async def _stream_cli(proc, stdin_data: bytes, on_line: Callable[[str], None]) -> bytes:
@@ -550,10 +552,10 @@ async def _spawn_claude(
         try:
             event = json.loads(line)
         except json.JSONDecodeError:
-            logger.warning(f"claude CLI emitted non-JSON line: {line[:200]}")
+            logger.warning(f"claude CLI emitted non-JSON line: {line[:_LOGGED_LINE_CHARS]}")
             return
         if not isinstance(event, dict):
-            logger.warning(f"claude CLI emitted a non-object JSON line: {line[:200]}")
+            logger.warning(f"claude CLI emitted a non-object JSON line: {line[:_LOGGED_LINE_CHARS]}")
             return
         trajectory.append(event)
         etype = event.get("type")
@@ -589,7 +591,7 @@ async def _spawn_claude(
     except asyncio.TimeoutError:
         _kill_cli(proc)
         await _reap(proc)
-        return ClaudeResult(response="", tool_call_count=0, session_id=session_id,
+        return ClaudeResult(response="", tool_call_count=tool_count, session_id=session_id,
                             error=f"claude CLI timed out after {timeout_s}s")
     except Exception:
         # Reading failed, as when an event_callback raises: the CLI mustn't keep running.

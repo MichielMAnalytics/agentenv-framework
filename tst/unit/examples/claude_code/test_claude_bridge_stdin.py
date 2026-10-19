@@ -114,3 +114,16 @@ def test_timeout_kills_process_and_returns_error(spawn_capture_hang):
     assert "timed out" in result.error
     assert result.response == ""
     assert spawn_capture_hang["proc"].killed is True
+
+
+def test_a_timed_out_turn_keeps_the_tool_calls_it_made(monkeypatch):
+    tool_use = {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash", "input": {}}]}}
+
+    async def _exec(*cmd, **kwargs):
+        return FakeCLI((json.dumps(tool_use) + "\n").encode(), hang=True)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
+
+    result = asyncio.run(claude_bridge.run_claude(prompt="p", session_id="sess-1", resume=False, timeout_s=1))
+
+    assert "timed out" in result.error and result.tool_call_count == 1

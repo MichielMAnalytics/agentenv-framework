@@ -42,6 +42,10 @@ class DurableSessionRefs:
         super().set_session_ref_for_context(context_id, session_ref)
         self.__dict__.setdefault(_REFS_ATTR, {})[context_id] = session_ref
 
+    def bound_session_refs(self) -> list[str]:
+        """The session reference of every context this process has bound."""
+        return list(self.__dict__.get(_REFS_ATTR, {}).values())
+
 
 _NO_BODY_STATUSES = frozenset({204, 205, 304})
 
@@ -101,6 +105,9 @@ _URL_USERINFO_RE = re.compile(r"(?i)\b(https?://)[^\s/?#@]+@")
 _URL_QUERY_RE = re.compile(r"(?i)\b(https?://[^\s?#]+)\?(?!<redacted>)\S*")
 _LOGGED_URL_RE = re.compile(r"(?i)\b(?P<scheme>https?)://(?:[^/?#@\s]*@)?(?P<host>[^/?#\s]+)\S*")
 _REDACT_LOGGED_URLS: ContextVar[bool] = ContextVar("claude_code_filepart_download", default=False)
+_FILEPART_DOWNLOAD_TIMEOUT_S = 60
+# Two parts of one message sharing a name are told apart by this much of a uuid.
+_NAME_PREFIX_CHARS = 8
 
 
 class _RedactDownloadUrls(logging.Filter):
@@ -173,7 +180,7 @@ def _download_uri_to(uri: str, target: Path) -> None:
     if scheme not in ("http", "https"):
         raise FilePartMaterializeError(f"unsupported URI scheme {scheme!r} in {_shown(uri)}")
     try:
-        with _redacting_logged_urls(), httpx.Client(timeout=60, follow_redirects=True) as client:
+        with _redacting_logged_urls(), httpx.Client(timeout=_FILEPART_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
             response = client.get(uri)
             response.raise_for_status()
             target.write_bytes(response.content)
@@ -190,7 +197,7 @@ def _materialize(part: FilePart, target_dir: Path) -> str:
     name = _safe_name(part.name)
     target = target_dir / name
     if target.exists():
-        target = target_dir / f"{uuid.uuid4().hex[:8]}-{name}"
+        target = target_dir / f"{uuid.uuid4().hex[:_NAME_PREFIX_CHARS]}-{name}"
     if part.bytes is not None:
         try:
             target.write_bytes(base64.b64decode(part.bytes, validate=True))

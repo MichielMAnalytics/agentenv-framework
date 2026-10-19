@@ -297,3 +297,22 @@ def test_load_fetch_failure_is_a_typed_502(agent, client, store):
     assert response.json() == {
         "error": {"code": "transfer_rejected", "message": "The object store rejected the transfer.", "retryable": False}
     }
+
+
+def test_a_directory_link_is_archived_as_a_link_and_one_the_load_would_refuse_is_left_out(monkeypatch, tmp_path):
+    workspace, _ = _snapshot_roots(monkeypatch, tmp_path)
+    (workspace / "current").symlink_to("report", target_is_directory=True)
+    (workspace / "elsewhere").symlink_to("/etc", target_is_directory=True)
+    (workspace / "up").symlink_to("../..", target_is_directory=True)
+    archive = tmp_path / "workspace.tar.gz"
+
+    a2a_server._build_workspace_archive(archive)
+    with tarfile.open(archive, mode="r:gz") as tar:
+        links = {member.name: member.linkname for member in tar.getmembers() if member.issym()}
+    for child in list(workspace.iterdir()):
+        if child.is_symlink():
+            child.unlink()
+    a2a_server._restore_workspace_archive(archive)
+
+    assert links == {"current": "report"}
+    assert (workspace / "current").is_symlink() and (workspace / "current" / "answer.txt").read_text() == "done"

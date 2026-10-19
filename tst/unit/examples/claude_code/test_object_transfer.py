@@ -223,6 +223,9 @@ def test_a_turn_that_arrives_during_a_load_waits_for_it(monkeypatch, agent):
             turn = asyncio.create_task(agent.run(request))
             await asyncio.sleep(0.1)
             assert started == []
+            transcript = claude_bridge.session_jsonl_path("restored-session")
+            transcript.parent.mkdir(parents=True, exist_ok=True)
+            transcript.write_text('{"type": "user", "sessionId": "restored-session"}\n')
             agent.set_session_ref_for_context("restored", "restored-session")
         return await turn
 
@@ -252,3 +255,23 @@ def test_a_transfer_error_answers_with_the_typed_body(client, store):
         "error": {"code": "transfer_rejected", "message": "The object store rejected the transfer.", "retryable": False}
     }
     assert "sig=r" not in response.text
+
+
+def test_a_snapshot_load_keeps_the_transcripts_of_the_other_conversations(monkeypatch, tmp_path, agent, client, store):
+    conversation = (json.dumps({"type": "user", "sessionId": "s-1", "message": "hello"}) + "\n").encode()
+    _roots(monkeypatch, tmp_path, "s-1", conversation)
+    agent.set_session_ref_for_context("ctx-1", "s-1")
+    saved = client.post(SNAPSHOT_PATH, json={"context_id": "ctx-1", "objects": {
+        "trajectory": write_grant("snap/trajectory"), "workspace": write_grant("snap/workspace")}})
+    assert saved.status_code == 200, saved.text
+    other = a2a_server.SESSION_JSONL_DIR / "s-other.jsonl"
+    other.write_text(json.dumps({"type": "assistant", "sessionId": "s-other", "message": {"content": "mine"}}) + "\n")
+    agent.set_session_ref_for_context("ctx-other", "s-other")
+
+    loaded = client.put(SNAPSHOT_PATH, json={"objects": {
+        "trajectory": read_grant("snap/trajectory", len(conversation)),
+        "workspace": read_grant("snap/workspace", len(store.objects["snap/workspace"]))}})
+
+    assert loaded.status_code == 200, loaded.text
+    assert json.loads(other.read_text())["sessionId"] == "s-other"
+    assert client.post(TRAJECTORY_PATH, json={"context_id": "ctx-other"}).status_code == 200

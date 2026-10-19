@@ -11,10 +11,12 @@ import asyncio
 import json
 import logging
 import os
+import posixpath
 import shutil
 import tarfile
 import tempfile
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -84,6 +86,8 @@ _SKIPPABLE_WORKSPACE_ERRORS = (FileNotFoundError, PermissionError, NotADirectory
 
 # What agent-env keeps of a failed task's error_message.
 _ERROR_MESSAGE_LIMIT = 1000
+# How much of a changing workspace file one read stages.
+_STAGE_CHUNK_BYTES = 1024 * 1024
 
 
 class ClaudeCodeConfig(AgentConfig):
@@ -121,7 +125,22 @@ def _rewrite_session_ids(jsonl_text: str, session_id: str) -> tuple[list[str], i
     return rewritten, rewrite_count
 
 
+def _restorable_link(path: Path, arcname: str) -> bool:
+    """Whether the link at ``path`` restores where ``arcname`` puts it: relative, and inside the archive, as the load's
+    data filter requires."""
+    target = os.readlink(path)
+    if posixpath.isabs(target):
+        return False
+    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(arcname), target))
+    return resolved != ".." and not resolved.startswith("../")
+
+
 def _add_workspace_entry(tar: tarfile.TarFile, path: Path, arcname: str, *, stage_source: bool) -> bool:
+    try:
+        if path.is_symlink() and not _restorable_link(path, arcname):
+            return False
+    except OSError:
+        return False
     if not stage_source:
         try:
             tar.add(path, arcname=arcname, recursive=False)
@@ -143,7 +162,7 @@ def _add_workspace_entry(tar: tarfile.TarFile, path: Path, arcname: str, *, stag
         remaining = tarinfo.size
         while remaining:
             try:
-                chunk = source.read(min(1024 * 1024, remaining))
+                chunk = source.read(min(_STAGE_CHUNK_BYTES, remaining))
             except OSError:
                 return False
             if not chunk:
@@ -172,6 +191,8 @@ def _write_workspace_archive(archive_path: Path, *, stage_sources: bool = False)
                 arcname = "/".join(p for p in (archive_prefix, relative_root.as_posix()) if p)
                 if not _add_workspace_entry(tar, root, arcname, stage_source=stage_sources):
                     continue
+            # A link to a directory is listed here and never walked: it goes in as a link, like a file's.
+            filenames = sorted([*filenames, *(d for d in dirnames if (root / d).is_symlink())])
             for filename in filenames:
                 path = root / filename
                 arcname = "/".join(p for p in (archive_prefix, path.relative_to(source_root).as_posix()) if p)
@@ -238,10 +259,15 @@ def _copy_directory_contents(source: Path, destination: Path) -> None:
             shutil.copy2(child, target)
 
 
-def _restore_workspace_archive(archive_path: Path) -> None:
-    """Restore the workspace's files, and the archive's `.claude` to the CLI's state directory."""
+def _restore_workspace_archive(archive_path: Path, keep: Iterable[Path] = ()) -> None:
+    """Restore the workspace's files, and the archive's `.claude` to the CLI's state directory, keeping the files in
+    ``keep`` the archive doesn't hold: the transcripts of the other conversations this agent resumes."""
     with tempfile.TemporaryDirectory(prefix="claude-snapshot-load-") as raw_stage:
-        stage = Path(raw_stage)
+        stage, kept = Path(raw_stage) / "archive", Path(raw_stage) / "kept"
+        kept.mkdir()
+        held = [(path, kept / str(index)) for index, path in enumerate(keep) if path.is_file()]
+        for path, copy in held:
+            shutil.copy2(path, copy)
         with tarfile.open(archive_path, mode="r:gz") as tar:
             # The data filter refuses absolute paths, traversal, devices and unsafe links before anything is written.
             tar.extractall(stage, filter="data")
@@ -261,6 +287,10 @@ def _restore_workspace_archive(archive_path: Path) -> None:
                 shutil.copy2(child, target)
         _clear_directory(CLAUDE_STATE_DIR)
         _copy_directory_contents(staged_state, CLAUDE_STATE_DIR)
+        for path, copy in held:
+            if not path.exists():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(copy, path)
 
 
 def _answer(uploaded: Uploaded) -> dict[str, Any]:
@@ -321,6 +351,23 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
     async def run(self, request: TaskRequest[ClaudeCodeConfig]) -> TaskResult:
         # The CLI's stdout events, appended as it prints them, are the turn's trajectory.
         request.trajectory.set_format(TRAJECTORY_FORMAT)
+        cfg = request.config
+        context_id = request.context_id
+        async with self._contexts_lock:
+            # Active from here, so a snapshot load can't clear the attachments written below.
+            self._active_contexts.add(context_id)
+            # Bound before the CLI starts, so a live trajectory read or a snapshot save finds this turn's session.
+            session_id = self.session_ref_for_context(context_id)
+            if session_id is None:
+                session_id = str(uuid.uuid4())
+                self.set_session_ref_for_context(context_id, session_id)
+        try:
+            return await self._turn(request, cfg, context_id, session_id)
+        finally:
+            self._active_contexts.discard(context_id)
+
+    async def _turn(self, request: TaskRequest[ClaudeCodeConfig], cfg: ClaudeCodeConfig, context_id: str,
+                    session_id: str) -> TaskResult:
         text_chunks: list[str] = []
         attachment_paths: list[str] = []
         try:
@@ -339,16 +386,8 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             paths_block = "\n".join(attachment_paths)
             user_text = f"{user_text}\n\n{paths_block}" if user_text else paths_block
 
-        cfg = request.config
-        context_id = request.context_id
-        async with self._contexts_lock:
-            self._active_contexts.add(context_id)
-            # Bound before the CLI starts, so a live trajectory read or a snapshot save finds this turn's session.
-            session_id = self.session_ref_for_context(context_id)
-            resume = session_id is not None
-            if not resume:
-                session_id = str(uuid.uuid4())
-                self.set_session_ref_for_context(context_id, session_id)
+        # A turn that failed before the CLI wrote its transcript left no session to resume.
+        resume = session_jsonl_path(session_id).exists()
         try:
             result = await run_claude(
                 prompt=user_text,
@@ -372,8 +411,6 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
             logger.error(f"claude CLI invocation raised: {e}", exc_info=True)
             return (TaskResult.builder().failed("infra_error", str(e)[:_ERROR_MESSAGE_LIMIT], error_type="infra_error")
                     .add_text(str(e)).build())
-        finally:
-            self._active_contexts.discard(context_id)
         # The CLI keeps the session id it's given; if it ever reports another, the next turn resumes that one.
         if result.session_id and result.session_id != session_id:
             session_id = result.session_id
@@ -499,8 +536,9 @@ class ClaudeCodeAgent(DurableSessionRefs, AgentEnvAgent):
                 if self._active_contexts:
                     raise HTTPException(status_code=409, detail="cannot load a workspace while an agent turn is running")
                 if has_workspace_archive:
+                    keep = [session_jsonl_path(session) for session in self.bound_session_refs()]
                     try:
-                        await asyncio.to_thread(_restore_workspace_archive, archive_path)
+                        await asyncio.to_thread(_restore_workspace_archive, archive_path, keep)
                     except (tarfile.TarError, OSError, ValueError) as exc:
                         raise HTTPException(status_code=400, detail=f"invalid workspace archive: {exc}") from exc
                 SESSION_JSONL_DIR.mkdir(parents=True, exist_ok=True)
