@@ -94,19 +94,29 @@ def _on_signal(count: int) -> None:
 
 
 async def _poll(runner, runs: list[SubmittedRun], step_lines) -> None:
+    """Reads every run before raising the first read that failed, so a run that ended is seen as ended."""
+    errors = []
     for run in runs:
-        if run.done:
-            continue
-        record = await runner.status(run.handle.run_id)
-        run.instance = find_task_instance(run.handle.instance_id) or run.instance
-        for step in run.instance.completed_steps if run.instance else []:
-            if (step.step_id, step.status) not in run.steps:
-                run.steps.add((step.step_id, step.status))
-                _echo_step(run, step.step_id, step.status == TaskStepStatus.SUCCESS, step_lines)
-        if record is not None and (run.record is None or record.status != run.record.status):
-            run.record = record
-            _echo(run.tag, f"Run {run.outcome}",
-                  "green" if record.status is RunStatus.COMPLETED else "red" if record.status.is_terminal else "yellow")
+        if not run.done:
+            try:
+                await _poll_run(runner, run, step_lines)
+            except Exception as e:
+                errors.append(e)
+    if errors:
+        raise errors[0]
+
+
+async def _poll_run(runner, run: SubmittedRun, step_lines) -> None:
+    record = await runner.status(run.handle.run_id)
+    run.instance = find_task_instance(run.handle.instance_id) or run.instance
+    for step in run.instance.completed_steps if run.instance else []:
+        if (step.step_id, step.status) not in run.steps:
+            run.steps.add((step.step_id, step.status))
+            _echo_step(run, step.step_id, step.status == TaskStepStatus.SUCCESS, step_lines)
+    if record is not None and (run.record is None or record.status != run.record.status):
+        run.record = record
+        _echo(run.tag, f"Run {run.outcome}",
+              "green" if record.status is RunStatus.COMPLETED else "red" if record.status.is_terminal else "yellow")
 
 
 def _echo_step(run: SubmittedRun, step_id: str, passed: bool, step_lines) -> None:

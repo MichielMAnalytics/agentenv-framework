@@ -157,10 +157,14 @@ def test_each_seed_of_a_batch_is_torn_down(monkeypatch, tmp_path, torn_down):
 
 
 class _OneQuickOneSlow(_Deploys):
-    """Its first run ends at once; every later one naps."""
+    """Its first run ends at once and every later one naps, or the other way round when ``quick_last``."""
+
+    def __init__(self, quick_last=False):
+        super().__init__()
+        self.quick_last = quick_last
 
     async def run(self, context, **kwargs):
-        self.nap = 0 if not self.contexts else 30
+        self.nap = 0 if bool(self.contexts) == self.quick_last else 30
         return await super().run(context, **kwargs)
 
 
@@ -208,19 +212,19 @@ def test_a_cancel_another_runner_cant_carry_out_leaves_a_kept_run_kept_and_torn_
     assert "Holding 2 sandboxes up" in result.output and _ids(torn_down) == ["sb-1", "sb-2"]
 
 
-def test_an_error_following_kept_runs_still_tears_down_one_that_ended(monkeypatch, tmp_path, torn_down):
-    real_status, ended = local_runner.LocalRunner.status, []
+@pytest.mark.parametrize("quick_last", [False, True], ids=["ended-first", "ended-last"])
+def test_an_error_following_kept_runs_still_tears_down_one_that_ended(monkeypatch, tmp_path, torn_down, quick_last):
+    real_status = local_runner.LocalRunner.status
 
     async def status(self, run_id):
         record = await real_status(self, run_id)
-        if ended and run_id not in ended:
+        if record.status is not RunStatus.COMPLETED and any(
+                run.status is RunStatus.COMPLETED for run in run_store.list_runs()):
             raise RuntimeError("run index unreachable")
-        if record.status is RunStatus.COMPLETED:
-            ended.append(run_id)
         return record
 
     monkeypatch.setattr(local_runner.LocalRunner, "status", status)
-    task = _OneQuickOneSlow()
+    task = _OneQuickOneSlow(quick_last)
 
     result = _invoke(monkeypatch, tmp_path, task, "run", "--k", "2", "--keep")
 
