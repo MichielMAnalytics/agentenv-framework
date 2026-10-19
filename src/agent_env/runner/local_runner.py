@@ -154,6 +154,7 @@ class LocalRunner(Runner):
 
     async def _run(self, record: RunRecord) -> None:
         from agent_env.task import Task
+        from agent_env.task.store import find_task_instance
 
         run_task: Optional[asyncio.Task] = None
         context = None
@@ -163,11 +164,13 @@ class LocalRunner(Runner):
                     return                            # canceled while it waited for a slot
                 run_store.set_running(record.run_id)
                 logger.info("Run %s starting (task=%s v%s)", record.run_id, record.task_id, record.task_version)
-                task = Task.get(record.task_id, record.task_version)
+                stored = find_task_instance(record.instance_id)
+                version = record.task_version if record.task_version is not None or stored is None else stored.task_version
+                task = Task.get(record.task_id, version)
                 if task is None:
-                    raise LookupError(f"Task {record.task_id} v{record.task_version} not found")
+                    raise LookupError(f"Task {record.task_id} v{version} not found")
 
-                context = self._seed_context(record)
+                context = self._seed_context(record, stored)
                 self._contexts[record.run_id] = context
                 # start_step rides in metadata but Task.run takes it as a keyword;
                 # without lifting it out here every resume re-ran from zero.
@@ -246,16 +249,15 @@ class LocalRunner(Runner):
             run_store.mark_terminal(run_id, RunStatus.COMPLETED)
             logger.info("Run %s completed", run_id)
 
-    def _seed_context(self, record: RunRecord):
-        """Build the context ``Task.run()`` mutates, carrying the run identity in metadata.
+    def _seed_context(self, record: RunRecord, stored):
+        """Build the context ``Task.run()`` mutates, from the ``stored`` instance it continues if any, carrying the run
+        identity in metadata.
 
         ``workflow_id`` holds the run id — the hub, instance documents and UI all key off it —
         so nothing downstream needs a special case for the local runner.
         """
-        from agent_env.task.store import find_task_instance
         from agent_env.task_step import TaskStepContext
 
-        stored = find_task_instance(record.instance_id)
         context = TaskStepContext.from_dict(stored.context) if stored and stored.context else TaskStepContext()
         context.metadata.update(record.overrides.get("metadata") or {})
         context.metadata["workflow_id"] = record.run_id
