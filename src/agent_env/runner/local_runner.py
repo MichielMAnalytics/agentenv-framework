@@ -166,6 +166,9 @@ class LocalRunner(Runner):
                 logger.info("Run %s starting (task=%s v%s)", record.run_id, record.task_id, record.task_version)
                 stored = find_task_instance(record.instance_id)
                 version = record.task_version if record.task_version is not None or stored is None else stored.task_version
+                if stored is not None and (stored.task_id, stored.task_version) != (record.task_id, version):
+                    raise ValueError(f"Instance {record.instance_id} is a run of {stored.task_id} v{stored.task_version}, "
+                                     f"not of {record.task_id} v{version}")
                 task = Task.get(record.task_id, version)
                 if task is None:
                     raise LookupError(f"Task {record.task_id} v{version} not found")
