@@ -14,8 +14,12 @@ def test_the_pyproject_holds_the_one_quoted_protocol_requirement_the_release_pin
     assert len(re.findall(r'"agentenv-framework-protocol[^"]*"', (REPO / "pyproject.toml").read_text())) == 1
 
 
-def test_the_echo_mcp_requirements_the_release_pins_hold_one_protocol_line():
-    (path,) = re.findall(r"^\s*echo_requirements=(\S+)$", WORKFLOW, re.MULTILINE)
-    lines = (REPO / path).read_text().splitlines()
+def test_each_shipped_example_requirements_file_the_release_pins_holds_one_protocol_line():
+    (pattern,) = re.findall(r"^\s*for requirements in (\S+); do$", WORKFLOW, re.MULTILINE)
+    pinned = {path.relative_to(REPO).as_posix(): [line for line in path.read_text().splitlines()
+                                                   if line.startswith("agentenv-framework-protocol")]
+              for path in REPO.glob(pattern)}
 
-    assert len([line for line in lines if line.startswith("agentenv-framework-protocol")]) == 1
+    assert {"src/agent_env/examples/echo-mcp/envs/echo/requirements.txt",
+            "src/agent_env/examples/agents/agents/claude-code/requirements.txt"} <= set(pinned)
+    assert all(len(lines) == 1 for lines in pinned.values()), pinned
