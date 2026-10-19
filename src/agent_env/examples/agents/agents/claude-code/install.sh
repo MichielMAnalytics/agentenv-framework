@@ -20,22 +20,24 @@ UV_SHA256_X86_64=6c86040a8f045ab9adc9e3ec4cdafa03fd00e9a988ed2bf28971c7fc2d0debd
 UV_SHA256_AARCH64=345a8308e4d1835cdfaadf692836fd3137a6d45864773f05ad7bf59442b1ba16
 PYTHON_VERSION=3.12
 START_TIMEOUT_S=120
+STOP_TIMEOUT_S=10
 CLAUDE_CODE_VERSION=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$here/Dockerfile")
 AGENT_FILES="a2a_server.py claude_bridge.py kit.py requirements.txt run.sh"
 
+# put SRC DEST replaces DEST by a rename, so a binary an earlier install's agent still runs can be replaced.
 case $mode in
   container)
     root=/opt/agentenv-agent-$port  # one per agent: two in a container listen on two ports
     workdir=
     on() { docker exec -u 0 "$target" sh -c "$1"; }
-    put() { docker cp "$1" "$target:$2" > /dev/null; }
+    put() { docker cp "$1" "$target:$2.new" > /dev/null && on "mv -f $(quoted "$2.new") $(quoted "$2")"; }
     ;;
   host)
     [ "$(uname -s)" = Linux ] || { echo "a host install needs a Linux host, not $(uname -s)" >&2; exit 1; }
     root=$here/../agent-$target
     workdir=$4
     on() { sh -c "$1"; }
-    put() { cp "$1" "$2"; }
+    put() { cp "$1" "$2.new" && mv -f "$2.new" "$2"; }
     ;;
   *) echo "usage: install.sh container NAME PORT | install.sh host NAME PORT WORKDIR" >&2; exit 2 ;;
 esac
@@ -96,7 +98,13 @@ chmod 0755 "$stage/claude" "$stage/uv-$uv_cpu-unknown-linux-musl/uv"
   printf 'DISABLE_AUTOUPDATER=1\nCLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1\n'
 } > "$stage/agent.env"
 
-on "mkdir -p $r/bin $r/app $r/claude"
+# An earlier install's agent, a retried step's say, stops first: its files are replaced and its port is freed.
+on "if [ -f $r/agent.pid ]; then pid=\$(cat $r/agent.pid); kill \$pid 2> /dev/null; i=0; \
+  while [ \$i -lt $STOP_TIMEOUT_S ] && kill -0 \$pid 2> /dev/null; do sleep 1; i=\$((i + 1)); done; \
+  kill -9 \$pid 2> /dev/null; rm -f $r/agent.pid; fi; true"
+
+# The agent starts afresh, with no skills or sessions of one it replaces.
+on "rm -rf $r/claude && mkdir -p $r/bin $r/app $r/claude"
 put "$stage/claude" "$root/bin/claude"
 put "$stage/uv-$uv_cpu-unknown-linux-musl/uv" "$root/bin/uv"
 put "$stage/agent.env" "$root/agent.env"
@@ -107,12 +115,9 @@ on "chmod 0600 $r/agent.env && chmod 0755 $r/bin/claude $r/bin/uv $r/app/run.sh"
 
 # A private Python, uv's own build of it and never the target's, with the agent's requirements; no cache is left behind.
 on "cd $r && export UV_PYTHON_PREFERENCE=only-managed UV_PYTHON_INSTALL_DIR=$r/python \
-  UV_CACHE_DIR=$r/cache && bin/uv venv --quiet --python $PYTHON_VERSION venv \
+  UV_CACHE_DIR=$r/cache && bin/uv venv --quiet --clear --python $PYTHON_VERSION venv \
   && bin/uv pip install --quiet --python venv/bin/python -r app/requirements.txt \
   && rm -rf $r/cache"
-
-# An earlier install's agent, if there is one, gives up its port.
-on "[ -f $r/agent.pid ] && kill \$(cat $r/agent.pid) 2>/dev/null; rm -f $r/agent.pid; true"
 
 if [ "$mode" = container ]; then
   docker exec -d -u 0 "$target" sh -c "exec $r/app/run.sh $r > $r/agent.log 2>&1"

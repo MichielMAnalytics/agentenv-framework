@@ -18,7 +18,7 @@ from agent_env.cli import cli
 from agent_env.config import configure, reset_config
 from agent_env.providers.sandbox_providers.local_sandbox import _host_ips
 from agent_env.store.object_store.local.grant_server import grant_server
-from tst.util.fake_anthropic import FakeAnthropic, tool_then_answer
+from tst.util.fake_anthropic import FakeAnthropic, Fault, tool_then_answer
 
 pytestmark = [pytest.mark.integration, pytest.mark.int_test_slow]
 
@@ -128,6 +128,27 @@ def test_two_agents_installed_into_one_container_each_keep_their_own_install(sta
     seen = (result.output, endpoint.tool_results())
     assert result.exit_code == 0 and "tasks/install.json v1: passed" in result.output, seen
     assert endpoint.tool_results() == [f"{NOTES}\n/workspace/task_repo\n{SKILL_BODY}"] * 2, seen
+
+
+def test_a_retried_install_replaces_the_agent_an_earlier_attempt_left_running_in_the_container(state, endpoint):
+    """The first turn fails, and its retry installs again into the same container, on the same port, while the
+    first install's agent still runs there."""
+    endpoint.respond = tool_then_answer("Bash", {"command": f"cat notes.txt; pwd; {READ_SKILL}"})
+    endpoint.fail_next(Fault("status", status=400))
+    bundle = _bundle(state / "bundle", "debian")
+    task = bundle / "tasks/install.json"
+    steps = json.loads(task.read_text())
+    for step in steps:
+        if step["id"] == "ask-coder":
+            step["retry_config"] = {"retry_from_step_id": "install-coder", "max_retries": 1}
+    task.write_text(json.dumps(steps))
+
+    result = CliRunner().invoke(cli, ["run", str(bundle)])
+
+    seen = (result.output, endpoint.tool_results())
+    assert result.exit_code == 0 and "tasks/install.json v1: passed" in result.output, seen
+    assert result.output.count("install-coder (install_agent)") == 2, seen
+    assert endpoint.tool_results() == [f"{NOTES}\n/workspace/task_repo\n{SKILL_BODY}"], seen
 
 
 @pytest.mark.skipif(platform.system() != "Linux", reason="a host install needs a Linux host")
