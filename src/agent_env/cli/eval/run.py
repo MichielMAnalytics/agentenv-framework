@@ -123,12 +123,14 @@ def _run_submitted(tasks, k: int, base_metadata: dict | None, output_dir: str | 
 @click.option("--k", "k", default=1, type=int, help="Number of parallel runs per task")
 @click.option("--max-concurrency", default=None, type=int, help="Maximum number of concurrent task runs")
 @click.option("--agent-model", default=None, type=str, help="Override the model used by prompt_agent steps")
+@click.option("--user-model", default=None, type=str, help="Override the model the user simulator runs on")
+@click.option("--judge-model", default=None, type=str, help="Override the model rubrics_verifier judges grade with")
 @click.option("--agent-artifact-id", default=None, type=str, help="Override the agent image artifact for deploy_agent steps")
 @click.option("--submit", is_flag=True,
               help="Hand the runs to the configured [runner] and follow them, instead of running them in this process; "
                    "the runner bounds their concurrency and tears them down, and Ctrl-C asks it to cancel them. "
                    "Not with --max-concurrency.")
-def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, agent_artifact_id: str | None, submit: bool):
+def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, max_concurrency: int | None, agent_model: str | None, user_model: str | None, judge_model: str | None, agent_artifact_id: str | None, submit: bool):
     """Run all tasks in an eval concurrently."""
     if k < 1:
         raise click.BadParameter("must be at least 1", param_hint="'--k'")
@@ -155,7 +157,9 @@ def run(eval_id: str, eval_version: int | None, output_dir: str | None, k: int, 
     print_banner()
 
     client_id = get_agent_env_client_id()
-    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else None
+    base_metadata = {"agent_env_hub": {"caller": client_id}} if client_id else {}
+    if overrides := {key: value for key, value in (("user_model", user_model), ("judge_model", judge_model)) if value}:
+        base_metadata["user_overrides"] = overrides
     if submit:
         _run_submitted(tasks, k, base_metadata, output_dir, agent_model, agent_artifact_id)
         return
