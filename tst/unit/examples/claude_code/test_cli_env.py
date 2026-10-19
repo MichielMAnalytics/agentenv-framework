@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -77,7 +78,7 @@ def spawned(monkeypatch):
     seen: dict = {}
 
     async def _exec(*cmd, **kwargs):
-        seen["cmd"], seen["env"] = list(cmd), kwargs["env"]
+        seen["cmd"], seen["env"], seen["cwd"] = list(cmd), kwargs["env"], kwargs.get("cwd")
         return FakeCLI(b'{"type": "result", "subtype": "success", "result": "ok", "session_id": "s"}\n')
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", _exec)
@@ -120,3 +121,29 @@ def test_a_404_from_the_endpoint_says_it_may_not_serve_anthropics_messages_api(m
         "claude CLI exited with code 1: API Error: 404 Not Found; https://router.example.com/v1 answered 404: Claude "
         "Code needs an endpoint serving Anthropic's Messages API (<base>/v1/messages), such as a LiteLLM gateway, "
         "that knows the model")
+
+
+@pytest.mark.parametrize("workspace, project", [
+    ("/app", "-app"),
+    ("/tmp/my_ws.x-y/Sub Dir", "-tmp-my-ws-x-y-Sub-Dir"),  # as the CLI names it, checked against 2.1.280
+])
+def test_a_sessions_transcripts_are_where_the_cli_keeps_them_for_its_workspace(workspace, project):
+    assert claude_bridge.project_dir(Path(workspace)) == claude_bridge.CLAUDE_STATE_DIR / "projects" / project
+
+
+def test_the_workspace_is_the_configured_one_else_the_working_directory_but_never_the_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("AGENT_WORKSPACE_DIR", str(tmp_path / "set"))
+    assert claude_bridge._workspace() == tmp_path / "set"
+    monkeypatch.delenv("AGENT_WORKSPACE_DIR")
+    monkeypatch.chdir(tmp_path)
+    assert claude_bridge._workspace() == tmp_path
+    monkeypatch.chdir("/")
+    assert claude_bridge._workspace() == Path("/app")
+
+
+def test_the_cli_runs_in_the_workspace(spawned, monkeypatch, tmp_path):
+    monkeypatch.setattr(claude_bridge, "WORKSPACE_DIR", tmp_path / "repo")
+
+    asyncio.run(claude_bridge.run_claude(prompt="p", session_id="s", resume=False))
+
+    assert spawned["cwd"] == tmp_path / "repo" and (tmp_path / "repo").is_dir()

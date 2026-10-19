@@ -21,7 +21,8 @@ def agent_dirs(monkeypatch, tmp_path):
         monkeypatch.setattr(module, "CLAUDE_STATE_DIR", state)
         monkeypatch.setattr(module, "SESSION_JSONL_DIR", sessions)
     monkeypatch.setattr(a2a_server, "SKILLS_DIR", state / "skills")
-    monkeypatch.setattr(a2a_server, "WORKSPACE_DIR", tmp_path / "app")
+    for module in (a2a_server, claude_bridge):
+        monkeypatch.setattr(module, "WORKSPACE_DIR", tmp_path / "app")
     monkeypatch.setattr(a2a_server, "INPUTS_DIR", tmp_path / "app" / "inputs")
     return state
 

@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+
+from agent_env.task_step.task_steps.install_agent import _build_param_resolvers
 
 from tst.unit.examples.claude_code.agent import AGENT_DIR
 from tst.unit.examples.claude_code.support import card
@@ -52,6 +55,7 @@ def test_extensions_and_their_routes(app):
         "urn:agentenv:mcp-config/v1": ("/ext/mcp-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:skill-config/v1": ("/ext/skill-config", {"add": ("POST", None), "list": ("GET", None)}),
         "urn:agentenv:snapshot/v1": ("/ext/snapshot", {"save": ("POST", None), "load": ("PUT", None)}),
+        "urn:agentenv:install/v1": (None, {}),
         "urn:agentenv:triggers/v1": ("/ext/triggers", {
             "register": ("POST", None), "decide": ("POST", "/ext/triggers/decide"), "state": ("GET", None),
         }),
@@ -120,9 +124,12 @@ def test_the_card_and_health_are_served(client):
     assert health.json() == {"status": "ok"}
 
 
-def test_install_agent_reads_the_card_and_finds_no_install_extension():
-    """install_agent runs this script in the image, with no agent environment, and parses its stdout as the card:
-    the agent declares no install/v1, so it says so rather than failing to import."""
+def _install(app) -> dict:
+    return _extensions(app)["urn:agentenv:install/v1"]["params"]
+
+
+def test_install_agent_reads_the_card_and_its_install_commands_from_the_image():
+    """install_agent runs this script in the image, with no agent environment, and parses its stdout as the card."""
     script = ("import sys, json; sys.path.insert(0, '/app'); "
               "from a2a_server import AGENT_CARD; "
               "print(json.dumps(AGENT_CARD.model_dump()))")
@@ -130,5 +137,38 @@ def test_install_agent_reads_the_card_and_finds_no_install_extension():
            "PYTHONPATH": str(AGENT_DIR)}
     out = subprocess.run([sys.executable, "-c", script], cwd=AGENT_DIR, env=env, capture_output=True, text=True,
                          check=True)
-    uris = [ext["uri"] for ext in json.loads(out.stdout)["capabilities"]["extensions"]]
-    assert "urn:agentenv:agent-config/v1" in uris and "urn:agentenv:install/v1" not in uris
+    (install,) = [ext for ext in json.loads(out.stdout)["capabilities"]["extensions"]
+                  if ext["uri"] == "urn:agentenv:install/v1"]
+    assert install["params"]["install_commands"] and install["params"]["install_commands_host"]
+
+
+def test_each_install_mode_asks_only_for_params_install_agent_supplies(app):
+    params = _install(app)
+    supplied = set(_build_param_resolvers(container_name="c", work_dir="/w", agent_ctx_tar="/w/a.tgz", a2a_port=8000,
+                                          config=None, agent_name="a"))
+    assert params["a2a_port"] == 8000
+    for commands, required in (("install_commands", "required_params"),
+                               ("install_commands_host", "required_params_host")):
+        placeholders = {name for command in params[commands] for name in re.findall(r"\{(\w+)\}", command)}
+        assert placeholders == set(params[required]) and set(params[required]) <= supplied, commands
+        assert "${" not in " ".join(params[commands])
+
+
+def test_the_install_runs_the_folders_own_script_in_each_mode(app):
+    params = _install(app)
+    container, host = params["install_commands"][-1], params["install_commands_host"][-1]
+    assert "bash {work_dir}/agent/install.sh container {container} {a2a_port}" in container
+    assert "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} /app" in host
+    for command in (container, host):
+        # The model key reaches the script in its environment, never as an argument.
+        assert command.startswith("LITELLM_API_KEY={litellm_api_key} ") and command.count("{litellm_api_key}") == 1
+
+
+def test_the_install_scripts_parse():
+    subprocess.run(["bash", "-n", str(AGENT_DIR / "install.sh")], check=True)
+    subprocess.run(["sh", "-n", str(AGENT_DIR / "run.sh")], check=True)
+
+
+def test_install_sh_installs_the_cli_version_the_image_pins():
+    pinned = re.search(r"^ARG CLAUDE_CODE_VERSION=(\S+)$", (AGENT_DIR / "Dockerfile").read_text(), re.MULTILINE)
+    assert pinned and "sed -n 's/^ARG CLAUDE_CODE_VERSION=//p'" in (AGENT_DIR / "install.sh").read_text()

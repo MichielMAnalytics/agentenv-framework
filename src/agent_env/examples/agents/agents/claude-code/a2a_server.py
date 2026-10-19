@@ -22,6 +22,7 @@ from typing import Any
 
 from a2a.types import AgentSkill
 from agentenv_protocol.a2a_agent import (
+    INSTALL_V1,
     MCP_CONFIG_V1,
     SKILL_CONFIG_V1,
     SNAPSHOT_V1,
@@ -56,6 +57,7 @@ from starlette.exceptions import HTTPException
 from claude_bridge import (
     CLAUDE_STATE_DIR,
     SESSION_JSONL_DIR,
+    WORKSPACE_DIR,
     read_partial_session_trajectory,
     run_claude,
     session_jsonl_path,
@@ -75,8 +77,6 @@ logger = logging.getLogger(__name__)
 HARNESS = "claude-code"
 # The versioned format of the stream-json events a turn's trajectory holds.
 TRAJECTORY_FORMAT = "claude-code-stream-json/1"
-# The CLI's cwd: what the model writes lands here, and collect_artifacts sees only that.
-WORKSPACE_DIR = Path("/app")
 # The CLI loads skills from <state>/skills/<name>/SKILL.md.
 SKILLS_DIR = CLAUDE_STATE_DIR / "skills"
 # FileParts are written here, one folder per task, and their paths appended to the prompt: the CLI reads a path in
@@ -88,6 +88,17 @@ _SKIPPABLE_WORKSPACE_ERRORS = (FileNotFoundError, PermissionError, NotADirectory
 _ERROR_MESSAGE_LIMIT = 1000
 # How much of a changing workspace file one read stages.
 _STAGE_CHUNK_BYTES = 1024 * 1024
+
+# install/v1: the folder, unpacked on the sandbox's host, installs itself (install.sh); install_agent fills each {param}
+# in, quoted. The endpoint and CA go in the environment, not on the agent's command line.
+_A2A_PORT = 8000
+_UNPACK = "mkdir -p {work_dir}/agent && tar -xzf {agent_ctx_tar} -C {work_dir}/agent"
+_ENDPOINT = ("LITELLM_API_KEY={litellm_api_key} LITELLM_BASE_URL={litellm_base_url} "
+             "LITELLM_EXTRA_HEADERS={litellm_extra_headers} AGENT_TRUST_ENV={trust_env} ")
+_ENDPOINT_PARAMS = ["litellm_api_key", "litellm_base_url", "litellm_extra_headers", "trust_env"]
+_INSTALL_COMMANDS = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh container {container} {a2a_port}"]
+# On a host there's no container working directory: the agent works in /app, as in its image.
+_INSTALL_COMMANDS_HOST = [_UNPACK, _ENDPOINT + "bash {work_dir}/agent/install.sh host {agent_name} {a2a_port} /app"]
 
 
 class ClaudeCodeConfig(AgentConfig):
@@ -260,8 +271,8 @@ def _copy_directory_contents(source: Path, destination: Path) -> None:
 
 
 def _restore_workspace_archive(archive_path: Path, keep: Iterable[Path] = ()) -> None:
-    """Restore the workspace's files, and the archive's `.claude` to the CLI's state directory, keeping the files in
-    ``keep`` the archive doesn't hold: the transcripts of the other conversations this agent resumes."""
+    """Restore the workspace's files, and the archive's `.claude` to the CLI's state directory, keeping the current
+    copy of each file in ``keep``: the transcripts of the conversations this agent resumes."""
     with tempfile.TemporaryDirectory(prefix="claude-snapshot-load-") as raw_stage:
         stage, kept = Path(raw_stage) / "archive", Path(raw_stage) / "kept"
         kept.mkdir()
@@ -288,9 +299,8 @@ def _restore_workspace_archive(archive_path: Path, keep: Iterable[Path] = ()) ->
         _clear_directory(CLAUDE_STATE_DIR)
         _copy_directory_contents(staged_state, CLAUDE_STATE_DIR)
         for path, copy in held:
-            if not path.exists():
-                path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(copy, path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(copy, path)
 
 
 def _answer(uploaded: Uploaded) -> dict[str, Any]:
@@ -332,8 +342,17 @@ async def _fetch_granted_snapshot(objects: SnapshotReadObjects, archive_path: Pa
         enable(MCP_CONFIG_V1, description="Register MCP servers the Claude Code CLI should connect to."),
         enable(SKILL_CONFIG_V1, description="Register a skill the Claude Code CLI loads from its skills directory."),
         enable(SNAPSHOT_V1, description=(
-            "Capture and restore the Claude Code conversation, the /app workspace and the CLI's state, "
+            "Capture and restore the Claude Code conversation, its workspace and the CLI's state, "
             "through agent-env's object-transfer grants.")),
+        enable(
+            INSTALL_V1,
+            description="Commands to install this agent into a running task container, or onto its sandbox's host.",
+            install_commands=_INSTALL_COMMANDS,
+            a2a_port=_A2A_PORT,
+            required_params=["container", "work_dir", "agent_ctx_tar", "a2a_port", *_ENDPOINT_PARAMS],
+            install_commands_host=_INSTALL_COMMANDS_HOST,
+            required_params_host=["work_dir", "agent_ctx_tar", "a2a_port", "agent_name", *_ENDPOINT_PARAMS],
+        ),
         enable(TRIGGERS_V1, description=(
             "Register a typed trigger script and decide the stakeholder reply per turn "
             "(step / env_trigger / conversational / all / any conditions -> say / end actions).")),

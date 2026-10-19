@@ -11,4 +11,10 @@ on every model call. Building the image downloads Claude Code, which is Anthropi
 [Commercial Terms](https://www.anthropic.com/legal/commercial-terms); the image is built where it runs and never
 published. The CLI's version is the Dockerfile's `CLAUDE_CODE_VERSION`.
 
+`install_agent` installs it too, into a container a task already runs or onto a `vm` sandbox's Linux host, with
+`install.sh` from its folder: Claude Code's native build for the target's CPU and libc, uv, and the agent's requirements
+in a Python of its own, so the target's Python is left alone. The CLI runs its commands in bash or zsh, so a target with
+neither, Alpine's for one, gets bash from its own package manager. The agent works in the container's working directory,
+or in `/app` on the host.
+
 Run its smoke task with `agent-env run agents`.

@@ -20,8 +20,25 @@ logger = logging.getLogger(__name__)
 
 # The CLI's own state: settings, skills and session transcripts. The image fixes it, so it doesn't follow the uid.
 CLAUDE_STATE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-# The CLI keeps a session's transcript under a directory named for its cwd, which is always /app.
-SESSION_JSONL_DIR = CLAUDE_STATE_DIR / "projects" / "-app"
+
+
+def _workspace() -> Path:
+    """Where the CLI runs and the model's files land: AGENT_WORKSPACE_DIR, else this process's working directory (the
+    image's /app, or an installed agent's container's), except the filesystem root, which is never one."""
+    if configured := os.environ.get("AGENT_WORKSPACE_DIR"):
+        return Path(configured)
+    cwd = Path.cwd()
+    return Path("/app") if cwd == Path(cwd.anchor) else cwd
+
+
+def project_dir(workspace: Path) -> Path:
+    """Where the CLI keeps the transcripts of sessions run in ``workspace``: a directory named for it, each character
+    but a letter or digit as -."""
+    return CLAUDE_STATE_DIR / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace))
+
+
+WORKSPACE_DIR = _workspace()
+SESSION_JSONL_DIR = project_dir(WORKSPACE_DIR)
 
 # The model aliases the CLI resolves for itself, pinned to the run's model on a gateway that may serve no other.
 _MODEL_ALIASES = (
@@ -528,6 +545,7 @@ async def _spawn_claude(
                    system_prompt=system_prompt, output_format=output_format, role=role, effort=effort,
                    max_turns=max_turns)
     logger.info(f"Running claude CLI (resume={resume}, session_id={session_id}, model={model})")
+    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
     proc = await _started(asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
@@ -535,6 +553,7 @@ async def _spawn_claude(
         stderr=asyncio.subprocess.PIPE,
         env=cli_env(os.environ, model=model, project_id=project_id, task_id=task_id,
                     max_thinking_tokens=max_thinking_tokens),
+        cwd=WORKSPACE_DIR,
         start_new_session=True,
     ))
     trajectory: list[dict] = []

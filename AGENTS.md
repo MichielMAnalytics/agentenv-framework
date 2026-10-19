@@ -79,13 +79,17 @@ or one of them only where it is used.
   `install_commands_host` on this machine, with your privileges. Every command a local sandbox runs
   carries `AGENTENV_SANDBOX=<sandbox id>`, and teardown stops the processes that carry it, then removes
   what steps staged in `/tmp` under that id. Those processes are found through `/proc`, so on macOS
-  they keep running; files the install wrote elsewhere (`/opt`, packages) stay.
+  they keep running; files the install wrote elsewhere (`/opt`, packages) stay. Such an agent fetches the
+  local store's grants only when `grant_advertise_host` names an address this machine reaches, the
+  bridge address say: `host.docker.internal`, which grant URLs name by default, resolves only in containers.
 - `[agents] default_a2a_agent_id`: the agent a `deploy_agent` step without an id deploys; built-in
   `@local/agentenv-framework/agents/claude-code`, the `agents` bundle's Claude Code
   (`src/agent_env/examples/agents/`), overridable by `configure(default_a2a_agent_id=...)`. Any step's
   agent field left unset falls back to it (`entity.refs.default_agent_refs`), so a bundle run plans the
   default for it, pulling the built-in one from the installed `agents` bundle. Claude Code needs a model
-  endpoint serving Anthropic's Messages API, such as a LiteLLM gateway.
+  endpoint serving Anthropic's Messages API, such as a LiteLLM gateway. It declares `install/v1` too: its
+  folder's `install.sh` installs it into a task container or onto a VM sandbox's host, with its own Claude
+  Code, uv and Python, adding bash only to a target with neither bash nor zsh.
 - Secrets never live in the file: use `secret:KEY` or `env:NAME` references, resolved through
   `[stores.secret]`.
 - agent-env has no stage concept: "dev" versus "prod" is which file `AGENT_ENV_CONFIG` names. A
