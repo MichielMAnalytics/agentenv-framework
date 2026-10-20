@@ -18,6 +18,7 @@ from agent_env.providers.sandbox_providers.boxd.provider import (
 )
 from agent_env.providers.sandbox_providers.boxd.sandbox import DOCKER_READY, BoxdSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
+from agent_env.providers.sandbox_providers import sandbox_provider as sandbox_provider_module
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError
 
 from tst.unit.providers.sandbox_providers.boxd_fakes import fake_client_cls, result
@@ -163,12 +164,12 @@ async def test_create_vm_refuses_an_unenforceable_policy_before_creating(client_
 
 
 @pytest.mark.asyncio
-async def test_create_vm_refuses_an_allowlist_that_would_be_empty(client_cls, monkeypatch):
-    """boxd reads an empty allowlist as unrestricted, which would open egress."""
-    monkeypatch.setattr(BoxdSandboxProvider, "effective_network_policy", classmethod(lambda cls, policy: policy))
-    with pytest.raises(NetworkPolicyUnsupportedError):
-        await _provider(client_cls).create_vm(network_policy=NetworkPolicy(mode=ALLOWLIST))
-    assert client_cls.instances == []
+async def test_an_allowlist_always_holds_the_boxd_hosts(client_cls, monkeypatch):
+    """boxd reads an empty allowlist as unrestricted, so one is never sent, even with no other platform's hosts."""
+    monkeypatch.setattr(sandbox_provider_module, "all_sandbox_egress_hosts", lambda: ())
+    sandbox = await _provider(client_cls).create_vm(network_policy=NetworkPolicy(mode=ALLOWLIST), setup_for_gateway=False)
+    assert _machines(client_cls).egress_calls == [("m-1", ["*.boxd.sh"])]
+    assert sandbox.network_policy.allow_hosts == ("*.boxd.sh",)
 
 
 @pytest.mark.asyncio
@@ -183,7 +184,7 @@ async def test_create_vm_readies_docker_for_the_gateway(client_cls):
     await _provider(client_cls).create_vm(exposed_ports=[8080])
     machines = _machines(client_cls)
     assert machines.ready_calls == ["m-1"]
-    assert [call["command"] for call in machines.exec_calls] == [f"bash -c '{DOCKER_READY}' </dev/null"]
+    assert [call["command"] for call in machines.exec_calls] == [f"sudo bash -c '{DOCKER_READY}' </dev/null"]
 
 
 @pytest.mark.asyncio
@@ -241,6 +242,46 @@ async def test_a_create_whose_response_was_lost_deletes_the_machine_it_made(clie
     with pytest.raises(APIConnectionError):
         await _provider(client_cls).create_vm(setup_for_gateway=False)
     assert _machines(client_cls).deleted == ["m-1"]
+
+
+@pytest.mark.asyncio
+async def test_a_create_the_sdk_retried_into_its_own_name_keeps_the_machine(client_cls):
+    """The SDK resends a create whose connection dropped; the resend finds the name taken by the first attempt."""
+    def first_attempt_made_it(client):
+        client.machines.create_error = ConflictError("name already exists", code="already_exists")
+        client.machines.create_commits = True
+
+    client_cls.on_init = first_attempt_made_it
+    sandbox = await _provider(client_cls).create_vm(setup_for_gateway=False)
+    assert sandbox.sandbox_id == "m-1"
+    assert _machines(client_cls).deleted == []
+
+
+def test_asyncio_run_waits_for_the_delete_of_a_machine_whose_setup_it_cancelled(client_cls):
+    """asyncio.run cancels what is left when its coroutine ends and waits for it; the delete is part of that wait."""
+    def slow(client):
+        client.machines.exec_delay = 5
+        client.machines.delete_delay = 0.2
+
+    client_cls.on_init = slow
+    provider = _provider(client_cls)
+
+    async def main():
+        asyncio.ensure_future(provider.create_vm())
+        while not client_cls.instances or not client_cls.instances[0].machines.exec_calls:
+            await asyncio.sleep(0.01)
+
+    asyncio.run(main())
+    assert _machines(client_cls).deleted == ["m-1"]
+
+
+@pytest.mark.asyncio
+async def test_close_closes_this_loops_client(client_cls):
+    provider = _provider(client_cls)
+    await provider.create_vm(setup_for_gateway=False)
+    await provider.close()
+    await provider.close()
+    assert client_cls.instances[0].closed == 1
 
 
 @pytest.mark.asyncio

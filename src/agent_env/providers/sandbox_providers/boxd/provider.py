@@ -14,7 +14,7 @@ import uuid
 import weakref
 from typing import Any, ClassVar, Self
 
-from boxd import AsyncBoxd, BoxdError, NotFoundError, ProxyEntry
+from boxd import AsyncBoxd, BoxdError, ConflictError, NotFoundError, ProxyEntry
 
 from agent_env.attribution import Attribution
 from agent_env.config.errors import ConfigError
@@ -110,16 +110,33 @@ async def _reap(client: Any, machine_id: str) -> None:
         raise asyncio.CancelledError
 
 
+async def _find_by_name(client: Any, org: str | None, name: str) -> Any:
+    for machine in await client.machines.list(org=org):
+        if machine.name == name:
+            return machine
+    return None
+
+
 async def _reclaim_by_name(client: Any, org: str | None, name: str) -> None:
     """Delete the machine a failed create may have made anyway, its response lost, found by its unique name."""
     try:
-        machines = await client.machines.list(org=org)
+        machine = await _find_by_name(client, org, name)
     except Exception as exc:  # noqa: BLE001 - best effort; the delete-after timer still removes it
         logger.warning("Could not look for a boxd machine %s left by a failed create: %s", name, exc)
         return
-    for machine in machines:
-        if machine.name == name:
-            await _reap(client, machine.id)
+    if machine is not None:
+        await _reap(client, machine.id)
+
+
+async def _delete_outcome(create: asyncio.Future, client: Any, org: str | None, name: str) -> None:
+    """Delete what a create its caller gave up on made, once it answers: the machine it returns, or the one it may
+    have made though it failed or was cancelled."""
+    try:
+        machine = await create
+    except (Exception, asyncio.CancelledError):
+        await _reclaim_by_name(client, org, name)
+        return
+    await _reap(client, machine.id)
 
 
 def _spawn(cleanup: Any) -> asyncio.Task:
@@ -128,6 +145,12 @@ def _spawn(cleanup: Any) -> asyncio.Task:
     _reapers.add(task)
     task.add_done_callback(_reapers.discard)
     return task
+
+
+async def _settle(cleanup: Any) -> None:
+    """Run ``cleanup`` to its end, also while the caller is being cancelled: ``asyncio.run`` waits for the task it
+    cancels, so it waits for the cleanup too. A second cancellation leaves the cleanup running on its own."""
+    await asyncio.shield(_spawn(cleanup))
 
 
 async def _tunnel_urls(client: Any, machine_id: str) -> dict[int, str]:
@@ -182,6 +205,12 @@ class BoxdSandboxProvider(SandboxProvider):
         return cls(**config)
 
     @classmethod
+    def effective_network_policy(cls, policy: NetworkPolicy | None) -> NetworkPolicy:
+        """Every platform's hosts, as on the base, and always boxd's own, so an allowlist is never empty: boxd reads an
+        empty one as unrestricted."""
+        return super().effective_network_policy(policy).with_hosts(cls.EGRESS_HOSTS)
+
+    @classmethod
     def supports_network_policy(cls, policy: NetworkPolicy) -> bool:
         """Allow-all, or an allowlist of hostnames, ``*.`` wildcards and public IPv4 addresses or ranges."""
         if not policy.restricts_egress:
@@ -194,6 +223,12 @@ class BoxdSandboxProvider(SandboxProvider):
         if client is None:
             client = self._clients[loop] = self._client_cls(api_key=self._api_key, base_url=self._base_url)
         return client
+
+    async def close(self) -> None:
+        """Close this event loop's client; a sandbox this provider made reopens its connection if it is used again."""
+        client = self._clients.pop(asyncio.get_running_loop(), None)
+        if client is not None:
+            await client.close()
 
     async def create_vm(
         self,
@@ -219,10 +254,10 @@ class BoxdSandboxProvider(SandboxProvider):
         vcpu, memory_size = machine_size(cpu, memory, disk_size_gb)
         effective_policy = self.effective_network_policy(network_policy)
         allowlist = egress_entries(effective_policy)
-        if not self.supports_network_policy(effective_policy) or (effective_policy.restricts_egress and not allowlist):
+        if not self.supports_network_policy(effective_policy):
             raise NetworkPolicyUnsupportedError(
-                "boxd enforces allow-all or a non-empty allowlist of hostnames, wildcards and public IPv4 addresses "
-                f"or ranges, not {effective_policy.to_dict()}"
+                "boxd enforces allow-all or an allowlist of hostnames, wildcards and public IPv4 addresses or ranges, "
+                f"not {effective_policy.to_dict()}"
             )
         resolved_attribution = {
             key: str(value)
@@ -260,12 +295,9 @@ class BoxdSandboxProvider(SandboxProvider):
             else:
                 await client.machines.wait_until_ready(machine.id, timeout=READY_TIMEOUT_SEC)
             return sandbox
-        except BaseException as error:
-            # The machine is deleted, with retries, whatever happens to this task; a failure waits for it and a
-            # cancellation leaves it running. The create's own error is the one raised.
-            reaper = _spawn(_reap(client, machine.id))
-            if not isinstance(error, asyncio.CancelledError):
-                await asyncio.shield(reaper)
+        except BaseException:
+            # The machine is deleted, with retries, before the create's own error or cancellation is raised.
+            await _settle(_reap(client, machine.id))
             raise
 
     @staticmethod
@@ -283,23 +315,21 @@ class BoxdSandboxProvider(SandboxProvider):
     async def _create_or_reclaim(client: Any, create_kwargs: dict[str, Any], org: str | None) -> Any:
         """Await the create. A machine that would otherwise run with no handle until its delete-after timer is
         deleted: the one a create yields after its caller was cancelled, and the one a create that failed may have made
-        anyway, its response lost, which is found by its unique name."""
+        anyway, its response lost, which is found by its unique name. The SDK retries a create that lost its
+        connection, so one refused because its name is taken can be this create's own machine, which is kept."""
+        name = create_kwargs["name"]
         task = asyncio.ensure_future(client.machines.create(**create_kwargs))
-
-        def delete_orphan(done: asyncio.Future) -> None:
-            # A create cancelled itself, as the loop's shutdown cancels it, may have made its machine all the same.
-            if done.cancelled() or done.exception() is not None:
-                _spawn(_reclaim_by_name(client, org, create_kwargs["name"]))
-            else:
-                _spawn(_reap(client, done.result().id))
-
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            task.add_done_callback(delete_orphan)
+            await _settle(_delete_outcome(task, client, org, name))
+            raise
+        except ConflictError:
+            if (machine := await _find_by_name(client, org, name)) is not None:
+                return machine
             raise
         except Exception:
-            await asyncio.shield(_spawn(_reclaim_by_name(client, org, create_kwargs["name"])))
+            await _settle(_reclaim_by_name(client, org, name))
             raise
 
     async def create_sandbox(

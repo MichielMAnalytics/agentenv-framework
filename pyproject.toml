@@ -87,7 +87,7 @@ tenki = [
 ]
 # The boxd machine provider, selected as the built-in `boxd` backend.
 boxd = [
-    "boxd~=0.2.17",  # AsyncBoxd machines, stream_exec stdin, proxies, egress allowlist and delete-after validated against 0.2.17
+    "boxd~=0.2.17",  # AsyncBoxd machines, exec, proxies, egress allowlist and delete-after validated against 0.2.17
 ]
 dev = [
     "agentenv-framework[aws,boxd,explorer,gcp,sail,tensorlake,tenki,vercel]",  # exercise portable optional providers and stores in CI

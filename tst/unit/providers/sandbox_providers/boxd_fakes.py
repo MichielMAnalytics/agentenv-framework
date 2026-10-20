@@ -38,6 +38,8 @@ class FakeMachines:
         self.ready_calls: list[str] = []
         self.results: list[ExecResult | BaseException] = []
         self.create_delay = 0.0
+        self.delete_delay = 0.0
+        self.exec_delay = 0.0
         self.create_error: BaseException | None = None
         # The server made the machine but the response was lost: create records it, then raises create_error.
         self.create_commits = False
@@ -77,6 +79,8 @@ class FakeMachines:
         return list(self.machines.values())
 
     async def delete(self, machine_id: str) -> None:
+        if self.delete_delay:
+            await asyncio.sleep(self.delete_delay)
         if self.delete_errors:
             raise self.delete_errors.pop(0)
         self.lookup(machine_id)
@@ -96,6 +100,8 @@ class FakeMachines:
 
     async def exec(self, machine_id: str, command: Any, **kwargs: Any) -> ExecResult:
         self.exec_calls.append({"machine_id": machine_id, "command": command, **kwargs})
+        if self.exec_delay:
+            await asyncio.sleep(self.exec_delay)
         outcome = self.results.pop(0) if self.results else ExecResult(stdout=b"", stderr=b"", exit_code=0)
         if isinstance(outcome, BaseException):
             raise outcome
@@ -111,9 +117,13 @@ class FakeClient:
     def __init__(self, **kwargs: Any):
         self.kwargs = kwargs
         self.machines = FakeMachines()
+        self.closed = 0
         type(self).instances.append(self)
         if type(self).on_init is not None:
             type(self).on_init(self)
+
+    async def close(self) -> None:
+        self.closed += 1
 
 
 def fake_client_cls() -> type[FakeClient]:

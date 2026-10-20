@@ -94,10 +94,19 @@ async def test_wait_for_vm_waits_for_the_machine_then_docker():
 
 
 @pytest.mark.asyncio
+async def test_wait_for_vm_retries_a_docker_probe_whose_stream_dropped(monkeypatch):
+    monkeypatch.setattr("asyncio.sleep", _no_sleep)
+    sandbox, client = await _sandbox()
+    client.machines.results = [APIConnectionError("unavailable"), result(stdout=b"Docker Compose version v2")]
+    await sandbox.wait_for_vm()
+    assert len(client.machines.exec_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_wait_for_vm_reports_a_docker_that_never_answers():
     sandbox, client = await _sandbox()
     client.machines.results = [result(stderr=b"docker daemon did not become ready", exit_code=1)]
-    with pytest.raises(RuntimeError, match="Docker not ready on boxd machine m-1: docker daemon did not become"):
+    with pytest.raises(RuntimeError, match=r"Docker not ready on boxd machine m-1: (?s:.*)docker daemon did not become ready"):
         await sandbox.setup_vm_for_gateway([8080])
 
 

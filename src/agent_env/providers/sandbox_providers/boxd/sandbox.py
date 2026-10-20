@@ -157,9 +157,10 @@ class BoxdSandbox(VmSandbox):
         """Wait until exec reaches the machine and its Docker daemon answers, and check for Compose v2, which
         ``deploy_env`` needs."""
         await self._client.machines.wait_until_ready(self.sandbox_id, timeout=READY_TIMEOUT_SEC)
-        exit_code, stdout, stderr = await self.exec_with_output("bash", "-c", DOCKER_READY)
-        if exit_code != 0:
-            raise RuntimeError(f"Docker not ready on boxd machine {self.sandbox_id}: {(stderr or stdout).strip()[-1500:]}")
+        try:
+            await self.exec_script(DOCKER_READY, max_retries=2)
+        except RuntimeError as exc:
+            raise RuntimeError(f"Docker not ready on boxd machine {self.sandbox_id}: {exc}") from exc
         logger.info("Docker ready on boxd machine %s", self.sandbox_id)
 
     async def setup_vm_for_gateway(self, exposed_ports: list[int] | None = None) -> None:
