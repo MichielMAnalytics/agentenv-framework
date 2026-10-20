@@ -5,6 +5,7 @@ model endpoint, so no model key is needed. Needs a Docker daemon and network acc
 import asyncio
 import json
 import logging
+import uuid
 
 import pytest
 from click.testing import CliRunner
@@ -12,7 +13,7 @@ from click.testing import CliRunner
 from agent_env.a2a_agent import A2AAgent, protocol
 from agent_env.artifact.store import reset_artifact_store
 from agent_env.cli import cli
-from agent_env.config import configure, reset_config
+from agent_env.config import configure, get_config, reset_config
 from agent_env.providers.sandbox_providers.local_sandbox import _host_ips
 from agent_env.store.object_store.local.grant_server import grant_server
 from agent_env.store.routing import namespace_routing
@@ -162,3 +163,31 @@ def test_a_project_id_posted_over_agent_config_attributes_every_model_call_to_th
     assert calls, "the CLI never called the endpoint"
     assert {call.headers.get("x-litellm-customer-id") for call in calls} == {"project-attr-1"}
     assert {call.headers.get("x-litellm-tags") for call in calls} == {"projectId:project-attr-1,taskId:task-attr-1"}
+
+
+def test_a_file_part_naming_a_stored_object_reaches_the_cli_through_a_grant(state, endpoint):
+    endpoint.respond = answer("pong")
+    # A bundle run writes the shipped agent and its image to this test's stores.
+    assert _run(_bundle(state / "one", "ask", _ask("Say pong.", "pong"))).exit_code == 0
+    notes = "notes-from-a-stored-object"
+    uri = get_config().get_object_store().put(f"file-parts/{uuid.uuid4().hex}/notes.txt", notes.encode(), "text/plain")
+    # The agent reads bytes or http(s) only, so it can read this object only through the grant core sends instead.
+    assert not uri.startswith(("http://", "https://"))
+    endpoint.respond = tool_then_answer("Bash", {"command": "cat inputs/*/*"})
+    context = TaskStepContext()
+    steps = [DeployAgentTaskStep(id="agent", version=None, sandbox_type="local"),
+             PromptAgentTaskStep(id="ask", version=None, prompt_id="ask", parts=[
+                 {"kind": "text", "text": "Read the attached notes."},
+                 {"kind": "file", "file": {"name": "notes.txt", "mimeType": "text/plain", "uri": uri}}])]
+
+    async def run():
+        try:
+            for step in steps:
+                await step.execute(context)
+        finally:
+            await teardown_run(context)
+
+    with namespace_routing():
+        asyncio.run(run())
+
+    assert endpoint.tool_results() == [notes]

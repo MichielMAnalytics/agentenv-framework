@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 
+import httpx
 import pytest
 from agentenv_protocol.a2a_agent import AGENT_CONFIG_V1
 
@@ -213,3 +214,49 @@ def test_attachments_are_written_while_the_turn_holds_a_snapshot_load_off(monkey
     send(client, [{"kind": "file", "file": {"name": "a.png", "mimeType": "image/png", "bytes": "cG5n"}}])
 
     assert active == [True] and agent._active_contexts == set()
+
+
+def _serving(monkeypatch, routes: dict[str, tuple[int, bytes]]) -> None:
+    """The agent's file-part downloads answered from ``routes``, a URL's status and body, with no network."""
+    client_class = httpx.Client
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        status, body = routes[str(request.url)]
+        return httpx.Response(status, content=body)
+
+    monkeypatch.setattr(kit.httpx, "Client",
+                        lambda **kwargs: client_class(transport=httpx.MockTransport(answer), **kwargs))
+
+
+def test_a_file_part_naming_an_https_url_is_downloaded_where_the_cli_reads_it(monkeypatch, tmp_path, calls, client):
+    monkeypatch.setattr(a2a_server, "INPUTS_DIR", tmp_path / "inputs")
+    url = "https://store.example.com/bucket/report.pdf?X-Amz-Signature=sig-123"
+    _serving(monkeypatch, {url: (200, b"%PDF-1.7 report")})
+    parts = [{"kind": "text", "text": "summarize"},
+             {"kind": "file", "file": {"name": "report.pdf", "mimeType": "application/pdf", "uri": url}}]
+
+    task = send(client, parts)
+
+    (call,) = calls
+    path = tmp_path / "inputs" / task["id"] / "report.pdf"
+    assert call["prompt"] == f"summarize\n\n{path}" and path.read_bytes() == b"%PDF-1.7 report"
+
+
+def test_a_failed_download_fails_the_turn_without_the_urls_signature(monkeypatch, calls, client):
+    url = "https://store.example.com/bucket/a.png?X-Amz-Signature=sig-123"
+    _serving(monkeypatch, {url: (403, b"denied")})
+    parts = [{"kind": "file", "file": {"name": "a.png", "mimeType": "image/png", "uri": url}}]
+
+    state, text, data = terminal(send(client, parts))
+
+    assert state == "failed" and "HTTP 403" in text and "sig-123" not in text
+    assert data[0]["error_code"] == "filepart_error" and calls == []
+
+
+def test_a_raw_store_uri_is_refused_saying_how_a_stored_object_arrives(calls, client):
+    parts = [{"kind": "file", "file": {"name": "a.png", "mimeType": "image/png", "uri": "s3://bucket/a.png"}}]
+
+    state, text, _ = terminal(send(client, parts))
+
+    assert state == "failed" and text.startswith("unsupported URI scheme 's3' in s3://bucket/a.png")
+    assert "agent-env sends an object its stores own as an https one" in text and calls == []

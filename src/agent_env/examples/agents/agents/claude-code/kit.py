@@ -178,7 +178,9 @@ def _safe_name(candidate: str | None) -> str:
 def _download_uri_to(uri: str, target: Path) -> None:
     scheme = urlsplit(uri).scheme.lower()
     if scheme not in ("http", "https"):
-        raise FilePartMaterializeError(f"unsupported URI scheme {scheme!r} in {_shown(uri)}")
+        raise FilePartMaterializeError(
+            f"unsupported URI scheme {scheme!r} in {_shown(uri)}: a file part reaches this agent as bytes or an "
+            "http(s) URL, and agent-env sends an object its stores own as an https one")
     try:
         with _redacting_logged_urls(), httpx.Client(timeout=_FILEPART_DOWNLOAD_TIMEOUT_S, follow_redirects=True) as client:
             response = client.get(uri)
