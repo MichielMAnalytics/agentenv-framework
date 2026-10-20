@@ -71,11 +71,32 @@ All keys go under `[sandbox.providers.boxd.config]`. Unknown keys are refused.
 | `api_key`  | required               | The boxd API key, as an `env:` or `secret:` reference.                                     |
 | `org`      | the key's organization | The organization machines are created in. A key works in its own organization only.        |
 | `base_url` | `https://boxd.sh:9443` | The boxd API endpoint.                                                                     |
+| `snapshot` | none                   | Boot every machine from this boxd snapshot instead of boxd's image (see below).           |
+
+## Faster startup
+
+A machine booted from boxd's image builds or pulls every image an environment or agent needs. Boot it from a snapshot
+of a machine that already has them, and those builds become cache hits: the `echo-mcp` bundle's `deploy_env` went from
+about 117 s to 47 s, with its five image builds taking 12 s in all.
+
+Keep one run's sandboxes up, clear the env machine down to its images, and save it:
+
+```bash
+agent-env -v run my-bundle --sandbox boxd --keep     # the "boxd machine started" line names the env's machine
+boxd machine exec agentenv-… -- sudo sh -c 'docker rm -f $(docker ps -aq); docker volume prune -af; docker network prune -f'
+boxd snapshots save agentenv-… agentenv-warm
+```
+
+Then stop the run with Ctrl-C and set `snapshot = "agentenv-warm"`. A snapshot holds the machine's memory and disk, so
+clear its containers and volumes first, or every machine restores them, data included. The images it keeps are the
+ones that machine built, so an agent whose image was built on another machine still builds it.
 
 ## Resources and lifetime
 
 - **Sizes:** boxd has four: 1 vCPU / 4 GiB, 2 vCPU / 8 GiB, 4 vCPU / 16 GiB and 8 vCPU / 32 GiB. A request gets the
   smallest that covers both its CPU and its memory, so agent-env's default (1 vCPU, 8 GiB) runs on 2 vCPU / 8 GiB.
+  With `snapshot`, every machine has the size the snapshot was saved at, and a request bigger than that is refused
+  before anything is created.
 - **Disk:** every machine has a fixed 100 GB copy-on-write disk.
 - **Refused requests:** a request beyond 8 vCPU, 32 GiB or 100 GB is refused before anything is created, not shrunk.
 - **Ignored requests:** `boot_mode` has no boxd equivalent, so a `boot_mode` that is set logs a warning and has no
@@ -88,7 +109,8 @@ All keys go under `[sandbox.providers.boxd.config]`. Unknown keys are refused.
 ## Networking
 
 - **Ports:** each exposed port gets a subdomain proxy, `https://p<port>.<machine>.boxd.sh`, which fills
-  `tunnel_urls`. It serves HTTP and WebSocket with no platform authentication.
+  `tunnel_urls`. It serves HTTP and WebSocket with no platform authentication. A machine restored from a snapshot
+  starts with the snapshot's proxies; the provider removes the ones for ports it wasn't asked to expose.
 - **Isolation:** every machine is created `isolated`. It has no peers on the organization's network, and boxd removes
   the in-machine `boxd` CLI, the metadata endpoint and account integrations from it. It keeps outbound internet unless
   an allowlist is set.
@@ -131,8 +153,8 @@ are named `agentenv-<random>`. agent-env's attribution, including `[sandbox.attr
   loop that writes a NUL byte to its stderr every minute. `exec` removes those bytes from what it returns.
 - **Lost connections:** when a command's stream ends without an exit status, `exec` returns exit code -1.
   `exec_script` retries idempotent scripts on -1 only.
-- **Images:** `create_vm(image=...)` is refused. Machines boot boxd's Ubuntu 24.04 image, and OCI images run under
-  Docker inside them.
+- **Images:** `create_vm(image=...)` is refused. Machines boot boxd's Ubuntu 24.04 image, or the configured
+  `snapshot`, and OCI images run under Docker inside them.
 - **Platform:** linux/amd64. GPUs are not supported.
 - **The model key enters the sandbox:** an agent's `LITELLM_API_KEY` is passed in, as on other providers.
 

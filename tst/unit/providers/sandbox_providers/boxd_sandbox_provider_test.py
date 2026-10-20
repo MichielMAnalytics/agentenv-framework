@@ -21,7 +21,7 @@ from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPo
 from agent_env.providers.sandbox_providers import sandbox_provider as sandbox_provider_module
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError
 
-from tst.unit.providers.sandbox_providers.boxd_fakes import fake_client_cls, result
+from tst.unit.providers.sandbox_providers.boxd_fakes import FakeSnapshot, fake_client_cls, result
 
 ALLOWLIST = NetworkMode.ALLOWLIST
 
@@ -94,8 +94,9 @@ def test_machine_name_is_a_public_dns_label_with_no_attribution():
 
 
 def test_from_config_takes_the_known_keys():
-    provider = BoxdSandboxProvider.from_config(api_key="bxd_x", org="research")
+    provider = BoxdSandboxProvider.from_config(api_key="bxd_x", org="research", snapshot="agentenv-warm")
     assert (provider._api_key, provider._org, provider._base_url) == ("bxd_x", "research", DEFAULT_BASE_URL)
+    assert provider._snapshot == "agentenv-warm"
 
 
 @pytest.mark.parametrize(("config", "message"), [
@@ -103,6 +104,7 @@ def test_from_config_takes_the_known_keys():
     ({}, "requires a non-empty 'api_key'"),
     ({"api_key": "k", "org": " "}, "non-empty string"),
     ({"api_key": "k", "base_url": 9443}, "non-empty string"),
+    ({"api_key": "k", "snapshot": ""}, "non-empty string"),
 ])
 def test_from_config_refuses_bad_config(config, message):
     with pytest.raises(ConfigError, match=message):
@@ -129,6 +131,48 @@ async def test_create_vm_makes_an_isolated_machine_with_a_lifetime_and_a_proxy_p
     assert sandbox.network_policy == NetworkPolicy()
     name = call["name"]
     assert sandbox.tunnel_urls == {8080: f"https://p8080.{name}.boxd.test", 9000: f"https://p9000.{name}.boxd.test"}
+
+
+def _with_snapshot(client_cls, vcpu=2, memory_gib=8, proxy_ports=()):
+    client_cls.on_init = lambda client: client.snapshots.snapshots.update(
+        {"agentenv-warm": FakeSnapshot("agentenv-warm", vcpu=vcpu, memory_bytes=memory_gib << 30,
+                                       proxy_ports=proxy_ports)})
+
+
+@pytest.mark.asyncio
+async def test_create_vm_restores_the_snapshot_and_adds_its_proxies(client_cls):
+    """A machine restored from a snapshot keeps the snapshot's size and starts with no proxies of its own."""
+    _with_snapshot(client_cls)
+    sandbox = await _provider(client_cls, snapshot="agentenv-warm").create_vm(
+        cpu=1, memory=4096, timeout=900, exposed_ports=[8080, 9000], setup_for_gateway=False)
+    machines = _machines(client_cls)
+    call = machines.create_calls[0]
+    assert (call["from_snapshot"], call["isolated"], call["delete_after"], call["auto_suspend_timeout"]) == (
+        "agentenv-warm", True, 900, 0)
+    assert not {"vcpu", "memory", "proxies"} & set(call)
+    assert [(name, port) for _, name, port in machines.proxies.create_calls] == [("p8080", 8080), ("p9000", 9000)]
+    assert sandbox.tunnel_urls == {port: f"https://p{port}.{call['name']}.boxd.test" for port in (8080, 9000)}
+
+
+@pytest.mark.asyncio
+async def test_a_restored_machine_serves_only_the_ports_it_was_asked_for(client_cls):
+    """boxd replays the snapshot's proxies onto the restored machine; the ones for other ports are removed."""
+    _with_snapshot(client_cls, proxy_ports=(8080, 18765, 18767))
+    provider = _provider(client_cls, snapshot="agentenv-warm")
+    sandbox = await provider.create_vm(exposed_ports=[8080, 9000], setup_for_gateway=False)
+    proxies = _machines(client_cls).proxies
+    assert sorted(name for _, name in proxies.delete_calls) == ["p18765", "p18767"]
+    assert [name for _, name, _ in proxies.create_calls] == ["p9000"]
+    assert sorted(sandbox.tunnel_urls) == [8080, 9000]
+    assert sorted((await provider.get_sandbox(sandbox.sandbox_id)).tunnel_urls) == [8080, 9000]
+
+
+@pytest.mark.asyncio
+async def test_a_request_bigger_than_the_snapshot_is_refused_before_creating(client_cls):
+    _with_snapshot(client_cls, vcpu=2, memory_gib=8)
+    with pytest.raises(ValueError, match="restores machines of 2 vCPU / 8 GiB"):
+        await _provider(client_cls, snapshot="agentenv-warm").create_vm(cpu=4, memory=16384)
+    assert _machines(client_cls).create_calls == []
 
 
 @pytest.mark.asyncio

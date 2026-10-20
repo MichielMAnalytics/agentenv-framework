@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://boxd.sh:9443"
 NAME_PREFIX = "agentenv"
 _SECTION = "[sandbox.providers.boxd.config]"
-_CONFIG_KEYS = frozenset({"api_key", "org", "base_url"})
+_CONFIG_KEYS = frozenset({"api_key", "org", "base_url", "snapshot"})
 
 # boxd's machine sizes, (vCPU, GiB of memory), smallest first; every machine has a fixed 100 GB disk.
 SIZES = ((1, 4), (2, 8), (4, 16), (8, 32))
@@ -162,6 +162,23 @@ async def _tunnel_urls(client: Any, machine_id: str) -> dict[int, str]:
     return urls
 
 
+async def _expose(client: Any, machine_id: str, ports: list[int]) -> dict[int, str]:
+    """Each port's public URL. A machine restored from a snapshot starts with the snapshot's proxies instead of the
+    ones asked for, so those for other ports are removed, and the missing ones added."""
+    urls = await _tunnel_urls(client, machine_id)
+    extra = [port for port in urls if port not in ports]
+    absent = [port for port in ports if port not in urls]
+    for port in extra:
+        await client.machines.proxies.delete(machine_id, f"p{port}")
+    for port in absent:
+        await client.machines.proxies.create(machine_id, f"p{port}", port)
+    if extra or absent:
+        urls = await _tunnel_urls(client, machine_id)
+    if missing := [port for port in ports if port not in urls]:
+        raise RuntimeError(f"boxd machine {machine_id} has no proxy for port(s) {missing}")
+    return {port: urls[port] for port in ports}
+
+
 class BoxdSandboxProvider(SandboxProvider):
     """Provision Docker-capable boxd machines, isolated, so a workload can't reach the account's other machines.
 
@@ -178,6 +195,7 @@ class BoxdSandboxProvider(SandboxProvider):
         api_key: str,
         org: str | None = None,
         base_url: str = DEFAULT_BASE_URL,
+        snapshot: str | None = None,
         client_cls: Any = AsyncBoxd,
     ):
         if not isinstance(api_key, str) or not api_key.strip():
@@ -185,6 +203,7 @@ class BoxdSandboxProvider(SandboxProvider):
         self._api_key = api_key
         self._org = org
         self._base_url = base_url
+        self._snapshot = snapshot
         # Injectable so unit tests never build an SDK client.
         self._client_cls = client_cls
         # One client per event loop, shared by every sandbox this provider creates or reconnects to: an SDK client
@@ -245,8 +264,9 @@ class BoxdSandboxProvider(SandboxProvider):
         network_policy: NetworkPolicy | None = None,
     ) -> BoxdSandbox:
         """Create an isolated boxd machine and expose ``exposed_ports`` publicly. ``timeout`` is the machine's
-        delete-after timer, its hard maximum lifetime. Machines boot boxd's image, which runs Docker, so a per-call
-        ``image`` is refused rather than ignored; ``boot_mode`` has no boxd equivalent and is ignored."""
+        delete-after timer, its hard maximum lifetime. Machines boot boxd's image, which runs Docker, or the configured
+        ``snapshot``, so a per-call ``image`` is refused rather than ignored; ``boot_mode`` has no boxd equivalent and is
+        ignored."""
         if image is not None:
             raise ValueError("boxd machines boot boxd's Docker-capable image; a per-call image is unsupported")
         if boot_mode is not None:
@@ -269,23 +289,23 @@ class BoxdSandboxProvider(SandboxProvider):
             "name": machine_name(),
             "org": self._org,
             "isolated": True,
-            "vcpu": vcpu,
-            "memory": memory_size,
             "delete_after": timeout,
             "auto_suspend_timeout": 0,
-            "proxies": [ProxyEntry(name=f"p{port}", port=port) for port in ports],
         }
-
         client = self._client()
+        if self._snapshot:
+            vcpu, memory_size = await self._snapshot_size(client, cpu, memory)
+            create_kwargs["from_snapshot"] = self._snapshot
+        else:
+            create_kwargs.update(vcpu=vcpu, memory=memory_size,
+                                 proxies=[ProxyEntry(name=f"p{port}", port=port) for port in ports])
+
         machine = await self._create_or_reclaim(client, create_kwargs, self._org)
         sandbox = BoxdSandbox(client, machine.id, tunnel_urls={}, network_policy=effective_policy)
         try:
             if effective_policy.restricts_egress:
                 await self._set_allowlist(client, machine.id, allowlist)
-            urls = await _tunnel_urls(client, machine.id)
-            if missing := [port for port in ports if port not in urls]:
-                raise RuntimeError(f"boxd machine {machine.id} has no proxy for port(s) {missing}")
-            sandbox.tunnel_urls = {port: urls[port] for port in ports}
+            sandbox.tunnel_urls = await _expose(client, machine.id, ports)
             logger.info(
                 "boxd machine started: machine_id=%s name=%s vcpu=%s memory=%s ports=%s attribution=%s",
                 machine.id, machine.name, vcpu, memory_size, ports, resolved_attribution,
@@ -299,6 +319,18 @@ class BoxdSandboxProvider(SandboxProvider):
             # The machine is deleted, with retries, before the create's own error or cancellation is raised.
             await _settle(_reap(client, machine.id))
             raise
+
+    async def _snapshot_size(self, client: Any, cpu: float, memory_mb: int) -> tuple[int, str]:
+        """``(vcpu, memory)`` of the machines the snapshot restores, the size it was saved at. A request bigger than
+        that is refused, since a restored machine can't be resized as it starts."""
+        snapshot = await client.snapshots.get(self._snapshot, org=self._org)
+        memory_gib = snapshot.memory_bytes >> 30
+        if cpu > snapshot.vcpu or memory_mb > memory_gib * 1024:
+            raise ValueError(
+                f"boxd snapshot {self._snapshot!r} restores machines of {snapshot.vcpu} vCPU / {memory_gib} GiB, less "
+                f"than the cpu={cpu}, memory={memory_mb}MB requested; save it from a machine at least that size"
+            )
+        return snapshot.vcpu, f"{memory_gib}G"
 
     @staticmethod
     async def _set_allowlist(client: Any, machine_id: str, allowlist: list[str]) -> None:

@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from boxd import ExecResult, NotFoundError, Proxy
+from boxd import CreatedProxy, ExecResult, NotFoundError, Proxy
 
 
 @dataclass
@@ -21,9 +21,45 @@ class FakeMachine:
 class FakeProxies:
     def __init__(self, machines: FakeMachines):
         self._machines = machines
+        self.create_calls: list[tuple[str, str, int]] = []
+        self.delete_calls: list[tuple[str, str]] = []
 
     async def list(self, machine_name: str) -> list[Proxy]:
         return list(self._machines.lookup(machine_name).proxies)
+
+    async def delete(self, machine_name: str, name: str) -> None:
+        self.delete_calls.append((machine_name, name))
+        machine = self._machines.lookup(machine_name)
+        machine.proxies = [proxy for proxy in machine.proxies if proxy.name != name]
+
+    async def create(self, machine_name: str, name: str, port: int) -> CreatedProxy:
+        self.create_calls.append((machine_name, name, port))
+        machine = self._machines.lookup(machine_name)
+        machine.proxies.append(_proxy(machine, name, port))
+        return CreatedProxy(name=name, port=port)
+
+
+@dataclass
+class FakeSnapshot:
+    name: str
+    vcpu: int = 2
+    memory_bytes: int = 8 << 30
+    proxy_ports: tuple[int, ...] = ()
+
+
+class FakeSnapshots:
+    def __init__(self):
+        self.snapshots: dict[str, FakeSnapshot] = {}
+
+    async def get(self, name: str, *, org: str | None = None) -> FakeSnapshot:
+        if name not in self.snapshots:
+            raise NotFoundError(f"snapshot {name!r} not found", code="not_found", grpc_code=5)
+        return self.snapshots[name]
+
+
+def _proxy(machine: FakeMachine, name: str, port: int) -> Proxy:
+    return Proxy(name=name, machine_id=machine.id, machine_name=machine.name, domain=f"{name}.{machine.name}.boxd.test",
+                 port=port, port_mode="locked", is_default=False)
 
 
 class FakeMachines:
@@ -46,6 +82,8 @@ class FakeMachines:
         self.egress_error: BaseException | None = None
         self.delete_errors: list[BaseException] = []
         self.proxies = FakeProxies(self)
+        # A machine restored from one of these starts with its proxies, as boxd replays them.
+        self.snapshots: dict[str, FakeSnapshot] = {}
         self._ids = 0
 
     def lookup(self, machine_id: str) -> FakeMachine:
@@ -59,12 +97,9 @@ class FakeMachines:
             await asyncio.sleep(self.create_delay)
         self._ids += 1
         machine = FakeMachine(id=f"m-{self._ids}", name=name or f"machine-{self._ids}")
-        machine.proxies = [
-            Proxy(name=entry.name, machine_id=machine.id, machine_name=machine.name,
-                  domain=f"{entry.name}.{machine.name}.boxd.test", port=entry.port, port_mode="locked",
-                  is_default=False)
-            for entry in kwargs.get("proxies") or []
-        ]
+        machine.proxies = [_proxy(machine, entry.name, entry.port) for entry in kwargs.get("proxies") or []]
+        if (snapshot := self.snapshots.get(kwargs.get("from_snapshot"))) is not None:
+            machine.proxies = [_proxy(machine, f"p{port}", port) for port in snapshot.proxy_ports]
         if self.create_error is not None and not self.create_commits:
             raise self.create_error
         self.machines[machine.id] = machine
@@ -117,6 +152,8 @@ class FakeClient:
     def __init__(self, **kwargs: Any):
         self.kwargs = kwargs
         self.machines = FakeMachines()
+        self.snapshots = FakeSnapshots()
+        self.machines.snapshots = self.snapshots.snapshots
         self.closed = 0
         type(self).instances.append(self)
         if type(self).on_init is not None:
