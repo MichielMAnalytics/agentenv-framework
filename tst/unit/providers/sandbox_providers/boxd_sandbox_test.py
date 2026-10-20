@@ -8,7 +8,13 @@ import pytest
 from boxd import APIConnectionError, APIStatusError, ConflictError, NotFoundError
 
 from agent_env.providers.sandbox_providers.boxd import sandbox as sandbox_module
-from agent_env.providers.sandbox_providers.boxd.sandbox import BoxdSandbox, allows_host, policy_from_entries
+from agent_env.providers.sandbox_providers.boxd.sandbox import (
+    _KEEPALIVE,
+    KEEPALIVE_SEC,
+    BoxdSandbox,
+    allows_host,
+    policy_from_entries,
+)
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy
 
 from tst.unit.providers.sandbox_providers.boxd_fakes import FakeClient, fake_client_cls, result
@@ -31,9 +37,19 @@ async def test_exec_runs_argv_shell_quoted_with_no_input_and_keeps_sudo():
     sandbox, client = await _sandbox()
     client.machines.results = [result(stdout=b"hi there\n")]
     assert (await sandbox.exec_with_output("sudo", "echo", "hi there"))[:2] == (0, "hi there\n")
-    assert client.machines.exec_calls == [
-        {"machine_id": "m-1", "command": "sudo echo 'hi there' </dev/null", "encoding": "buffer"},
-    ]
+    line = _KEEPALIVE.format(interval=KEEPALIVE_SEC, line="sudo echo 'hi there' </dev/null")
+    assert client.machines.exec_calls == [{"machine_id": "m-1", "command": line, "encoding": "buffer"}]
+
+
+@pytest.mark.asyncio
+async def test_exec_keeps_a_quiet_command_alive_and_drops_the_keepalive_bytes():
+    """boxd stops relaying a command that prints nothing for 30 minutes; the NULs that prevent it never reach callers."""
+    sandbox, client = await _sandbox()
+    client.machines.results = [result(stdout=b"done\n", stderr=b"\0\0err\n\0", exit_code=3)]
+    assert await sandbox.exec_with_output("sleep", "3600") == (3, "done\n", "err\n")
+    command = client.machines.exec_calls[0]["command"]
+    assert command.startswith(f"( while sleep {KEEPALIVE_SEC} </dev/null >/dev/null 2>&1; do printf '\\0' >&2; done ) &")
+    assert command.endswith("; c=$?; kill $k 2>/dev/null; exit $c")
 
 
 @pytest.mark.asyncio

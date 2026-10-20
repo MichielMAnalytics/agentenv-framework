@@ -127,6 +127,8 @@ are named `agentenv-<random>`. agent-env's attribution, including `[sandbox.attr
 - **Commands run as the `boxd` user**, who has passwordless sudo and is in the `docker` group, so the `sudo`
   agent-env prefixes is kept.
 - **Commands read no input:** each runs with standard input from `/dev/null`.
+- **Quiet commands:** boxd stops relaying a command that prints nothing for 30 minutes, so each command runs beside a
+  loop that writes a NUL byte to its stderr every minute. `exec` removes those bytes from what it returns.
 - **Lost connections:** when a command's stream ends without an exit status, `exec` returns exit code -1.
   `exec_script` retries idempotent scripts on -1 only.
 - **Images:** `create_vm(image=...)` is refused. Machines boot boxd's Ubuntu 24.04 image, and OCI images run under

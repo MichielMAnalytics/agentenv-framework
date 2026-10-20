@@ -33,6 +33,12 @@ done
 echo "docker daemon did not become ready" >&2
 exit 1
 """
+# boxd stops relaying a command that prints nothing for 30 minutes, and its exec never returns. A NUL on stderr every
+# minute keeps a quiet command's stream alive; exec drops them from what it returns. The loop's sleep holds none of
+# the exec's streams, so a finished command returns at once.
+KEEPALIVE_SEC = 60
+_KEEPALIVE = ("( while sleep {interval} </dev/null >/dev/null 2>&1; do printf '\\0' >&2; done ) & k=$!; "
+              "{line}; c=$?; kill $k 2>/dev/null; exit $c")
 # What exec returns when the stream drops without an exit status; exec_script retries only this.
 _UNKNOWN_EXIT_CODE = -1
 # Statuses of a stream boxd ended before the command did, which a rerun can get past.
@@ -129,20 +135,19 @@ class BoxdSandbox(VmSandbox):
         await delete_machine(self._client, self.sandbox_id)
 
     async def exec(self, *command: str) -> _CompletedProcess:
-        """Run argv to completion with no input. A stream lost before the command's exit status is exit -1, which
-        ``exec_script`` retries.
+        """Run argv to completion with no input, keeping its stream alive while it is quiet. A stream lost before the
+        command's exit status is exit -1, which ``exec_script`` retries.
 
         Standard input is ``/dev/null``: boxd's end of input can miss a command when several of one connection's
         execs read it at once, and the command then waits on its input forever."""
+        line = _KEEPALIVE.format(interval=KEEPALIVE_SEC, line=f"{shlex.join(command)} </dev/null")
         try:
-            result = await self._client.machines.exec(
-                self.sandbox_id, f"{shlex.join(command)} </dev/null", encoding="buffer",
-            )
+            result = await self._client.machines.exec(self.sandbox_id, line, encoding="buffer")
         except BoxdError as exc:
             if not _is_lost_stream(exc):
                 raise
             return _CompletedProcess(b"", f"{type(exc).__name__}: {exc}".encode(), _UNKNOWN_EXIT_CODE)
-        return _CompletedProcess(result.stdout, result.stderr, result.exit_code)
+        return _CompletedProcess(result.stdout, result.stderr.replace(b"\0", b""), result.exit_code)
 
     async def exec_with_output(self, *args: str) -> tuple[int, str, str]:
         """An exec whose stream was cut (exit -1) returns no stdout, so a caller that skips the exit code can't mistake

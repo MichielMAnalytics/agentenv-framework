@@ -16,7 +16,7 @@ from agent_env.providers.sandbox_providers.boxd.provider import (
     machine_name,
     machine_size,
 )
-from agent_env.providers.sandbox_providers.boxd.sandbox import DOCKER_READY, BoxdSandbox
+from agent_env.providers.sandbox_providers.boxd.sandbox import _KEEPALIVE, DOCKER_READY, KEEPALIVE_SEC, BoxdSandbox
 from agent_env.providers.sandbox_providers.sandbox import NetworkMode, NetworkPolicy, NetworkPolicyUnsupportedError
 from agent_env.providers.sandbox_providers import sandbox_provider as sandbox_provider_module
 from agent_env.providers.sandbox_providers.sandbox_provider import SandboxNotFoundError
@@ -184,7 +184,9 @@ async def test_create_vm_readies_docker_for_the_gateway(client_cls):
     await _provider(client_cls).create_vm(exposed_ports=[8080])
     machines = _machines(client_cls)
     assert machines.ready_calls == ["m-1"]
-    assert [call["command"] for call in machines.exec_calls] == [f"sudo bash -c '{DOCKER_READY}' </dev/null"]
+    assert [call["command"] for call in machines.exec_calls] == [
+        _KEEPALIVE.format(interval=KEEPALIVE_SEC, line=f"sudo bash -c '{DOCKER_READY}' </dev/null"),
+    ]
 
 
 @pytest.mark.asyncio
